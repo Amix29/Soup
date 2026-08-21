@@ -113,6 +113,21 @@ reproducing 70+ versions of notes.
 
 ### Fixed
 
+- **`downsample` now returns at most `max_points` rows, which is what its
+  docstring has always promised (#473).** The stride was
+  `len(rows) // max_points` — a divisor, not a cap — so five rows with
+  `max_points=2` came back with three, and the endpoint pin could add a
+  fourth. Sample indices are now spread evenly across the series with both
+  endpoints included, so `soup runs replay` renders exactly
+  `min(len(rows), max_points)` points. Even spacing also avoids the cliff a
+  ceil-based stride would introduce: a series one row over the cap keeps
+  `max_points` points rather than roughly half of them. `max_points=1` is the
+  one shape where both endpoints cannot fit and returns the final row, which
+  is what the endpoint pin existed to guarantee. The off-by-one guard added
+  in #470 is kept, renamed to `test_last_index_lands_on_last_row_no_duplicate`
+  and re-pinned to the new arithmetic. Consequence of the old behaviour was a
+  chart with a few more points than intended, never a wrong number.
+
 - **`cut_ce.py` and `liger.py` now normalize path separators and match architecture
   keywords on the last path component only (#456 by @harshitthek in #458).**
   On Windows, `rsplit("/")` never split on backslashes, causing parent directory
