@@ -114,7 +114,7 @@ reproducing 70+ versions of notes.
 ### Fixed
 
 - **`downsample` now returns at most `max_points` rows, which is what its
-  docstring has always promised (#473).** The stride was
+  docstring has always promised (#473 in #474).** The stride was
   `len(rows) // max_points` — a divisor, not a cap — so five rows with
   `max_points=2` came back with three, and the endpoint pin could add a
   fourth. Sample indices are now spread evenly across the series with both
