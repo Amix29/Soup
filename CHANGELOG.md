@@ -15,7 +15,7 @@ reproducing 70+ versions of notes.
 ### Added
 
 - **`soup mcp serve` gains network transports: `--transport sse` and
-  `--transport http` (#296).** v1 was stdio-only, which suits a client that
+  `--transport http` (#296 in #479).** v1 was stdio-only, which suits a client that
   spawns Soup as a subprocess but leaves remote and multi-client setups with
   nothing. Both new transports serve the *same* registry — the end-to-end test
   compares the advertised tool names against `build_registry` rather than a
