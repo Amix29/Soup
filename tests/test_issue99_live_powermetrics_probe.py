@@ -19,6 +19,7 @@ from soup_cli.utils.gpu_monitor import PowermetricsStatus, query_powermetrics
 def test_live_powermetrics_snapshot():
     """Require one real, parsed GPU utilization or power sample."""
     result = query_powermetrics(0.25)
+    print(f"live_powermetrics_result={result!r}")
     assert result.status is PowermetricsStatus.OK, result
     assert len(result.samples) == 1
     sample = result.samples[0]
