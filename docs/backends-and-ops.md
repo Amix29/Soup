@@ -767,9 +767,36 @@ pip install soup-cli[trackers]   # mlflow + swanlab + trackio
 ```
 
 
-## Telemetry (not yet wired)
+## Telemetry (opt-in)
 
-Soup contains opt-in, hardware-info-only telemetry primitives in `utils/trackers.py` (`build_telemetry_payload` / `send_telemetry_payload`), but they are **not wired to any command** — no data is ever sent, and no environment variable enables sending today. When wired, the payload will carry only `soup_version` / `command` / `python` major.minor / `os` / `arch` / optional `duration_seconds` — never dataset paths, model names, or config contents — behind a 1-second hard timeout and the same HTTPS-only, private-IP-rejecting SSRF policy as hub endpoints, swallowing every exception so telemetry can never crash training. Wiring is deferred until a public privacy policy is published.
+Soup ships a hardware-info-only telemetry payload (Soup version + command + Python major.minor + OS + arch + duration). It is **off by default** and never sends model names, dataset paths, or config contents. It runs asynchronously behind a 1-second hard timeout and swallows all exceptions so telemetry can never crash training.
+
+To enable it, you can opt in during the first-run prompt in the CLI, or explicitly set the environment variable:
+```bash
+SOUP_TELEMETRY=1 soup train --config soup.yaml
+```
+To explicitly disable it without being prompted, use the flag:
+```bash
+soup --no-telemetry train --config soup.yaml
+```
+
+### Privacy Policy
+
+Soup's telemetry is strictly anonymous and hardware-focused. We collect only the following fields to understand what environments we need to support:
+- `soup_version`: the version of Soup being run
+- `command`: the top-level command executed (e.g. `train`, `data`)
+- `python`: Python major.minor version
+- `os`: OS platform name
+- `arch`: System architecture
+- `duration_seconds`: Command execution duration
+
+We **NEVER** collect:
+- Dataset paths or contents
+- Model names or architectures
+- Config file contents or parameters
+- Local paths, IPs, or credentials
+
+An anonymous UUID `distinct_id` is generated locally on first run and stored at `~/.soup/telemetry_id` to deduplicate events.
 
 
 ## Plugin System
