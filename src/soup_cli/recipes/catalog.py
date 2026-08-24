@@ -48,7 +48,7 @@ def search_recipes(
 
 
 # ---------------------------------------------------------------------------
-# Recipe catalog (147 recipes)
+# Recipe catalog (149 recipes)
 # ---------------------------------------------------------------------------
 
 RECIPES: Dict[str, RecipeMeta] = {
@@ -3949,6 +3949,39 @@ training:
 output: ./output
 """,
     ),
+    "qwen3.5-35b-a3b-dpo": RecipeMeta(
+        model="Qwen/Qwen3.5-35B-A3B",
+        task="dpo",
+        size="35B",
+        tags=("qwen", "qwen3.5", "dpo", "moe", "mixture-of-experts"),
+        description="Qwen 3.5 35B-A3B MoE DPO (Apache-2.0, 3B active)",
+        yaml_str="""\
+base: Qwen/Qwen3.5-35B-A3B
+task: dpo
+modality: text
+
+data:
+  train: ./data/train.jsonl
+  format: dpo
+  max_length: 4096
+
+training:
+  epochs: 3
+  lr: 1e-5
+  batch_size: auto
+  gradient_accumulation_steps: 8
+  dpo_beta: 0.1
+  lora:
+    r: 16
+    alpha: 32
+    target_modules: auto
+  quantization: 4bit
+  moe_lora: true
+  moe_aux_loss_coeff: 0.01
+
+output: ./output
+""",
+    ),
     "qwen3.5-35b-a3b-sft": RecipeMeta(
         model="Qwen/Qwen3.5-35B-A3B",
         task="sft",
@@ -4344,6 +4377,43 @@ training:
   quantization: 4bit
   moe_lora: true
   moe_aux_loss_coeff: 0.01
+  gradient_checkpointing: true
+
+output: ./output
+""",
+    ),
+    "kimi-k2.6-grpo": RecipeMeta(
+        model="moonshotai/Kimi-K2.6",
+        task="grpo",
+        size="1T",
+        tags=("kimi", "moonshot", "grpo", "moe", "large", "multi-gpu"),
+        description=(
+            "Kimi K2.6 MoE GRPO (Modified MIT, ~1T / 32B active). "
+            "Requires multi-node DeepSpeed."
+        ),
+        yaml_str="""\
+base: moonshotai/Kimi-K2.6
+task: grpo
+
+data:
+  train: ./data/reasoning_train.jsonl
+  format: auto
+  max_length: 8192
+
+training:
+  epochs: 1
+  lr: 5e-6
+  batch_size: 1
+  gradient_accumulation_steps: 32
+  lora:
+    r: 32
+    alpha: 64
+    target_modules: auto
+  quantization: 4bit
+  grpo_beta: 0.1
+  num_generations: 4
+  reward_fn: accuracy
+  moe_lora: true
   gradient_checkpointing: true
 
 output: ./output
