@@ -77,6 +77,8 @@ _verbose = False
 _log_level = "normal"
 # v0.71.3 #183 — audit-log opt-out, set by the --no-audit-log callback flag.
 _audit_disabled = False
+# v0.71.41 #318 — telemetry opt-out.
+_telemetry_disabled = False
 
 # Global options that consume a following value (so the audit command-splitter
 # does not mistake the value for the subcommand name).
@@ -706,11 +708,18 @@ def main(
             "command under ~/.soup/audit.jsonl. v0.71.3."
         ),
     ),
+    no_telemetry: bool = typer.Option(
+        False,
+        "--no-telemetry",
+        help="Opt-out of anonymous hardware-only telemetry for this run.",
+    ),
 ):
     """Soup — fine-tune and post-train LLMs in one command."""
-    global _verbose, _log_level, _audit_disabled
+    global _verbose, _log_level, _audit_disabled, _telemetry_disabled
     _verbose = verbose
     _audit_disabled = no_audit_log
+    _telemetry_disabled = no_telemetry
+    _handle_telemetry_consent()
     from soup_cli.utils.log_level import (
         apply_logging_level,
         parse_log_level,
@@ -801,8 +810,80 @@ def _emit_audit_event(argv: list[str], exit_code: int) -> None:
         pass
 
 
+def _handle_telemetry_consent() -> None:
+    """Ask for telemetry consent on first run if interactive."""
+    import sys
+    from pathlib import Path
+
+    from soup_cli.utils.constants import SOUP_DIR
+
+    if os.environ.get("SOUP_TELEMETRY") is not None:
+        return
+
+    consent_file = Path.home() / SOUP_DIR / "telemetry_consent"
+    if consent_file.exists():
+        return
+
+    if not sys.stdout.isatty() or not sys.stdin.isatty():
+        return
+
+    from rich.prompt import Confirm
+    console.print("\n[dim]Soup collects anonymous, hardware-only telemetry to improve the CLI.[/]")
+    console.print("[dim]It never collects paths, models, config contents, or IP addresses.[/]")
+    console.print("[dim]Read the policy at: https://github.com/MakazhanAlpamys/Soup/blob/main/docs/backends-and-ops.md#privacy-policy[/]")
+    try:
+        agreed = Confirm.ask("Enable anonymous telemetry?", default=False)
+    except Exception:
+        agreed = False
+
+    try:
+        consent_file.parent.mkdir(parents=True, exist_ok=True)
+        consent_file.write_text("1" if agreed else "0", encoding="utf-8")
+    except Exception:
+        pass
+
+    os.environ["SOUP_TELEMETRY"] = "1" if agreed else "0"
+
+
+def _emit_telemetry(argv: list[str], duration_seconds: float) -> None:
+    if _telemetry_disabled:
+        return
+
+    from pathlib import Path
+
+    from soup_cli.utils.constants import SOUP_DIR
+    from soup_cli.utils.trackers import is_telemetry_enabled
+
+    if not is_telemetry_enabled():
+        consent_file = Path.home() / SOUP_DIR / "telemetry_consent"
+        try:
+            if not consent_file.exists() or consent_file.read_text(encoding="utf-8").strip() != "1":
+                return
+        except Exception:
+            return
+
+    try:
+        from soup_cli import __version__
+        from soup_cli.utils.trackers import build_telemetry_payload, send_telemetry_payload
+
+        command, _ = _split_command_args(argv)
+        command = (command or "(root)")[:64] or "(root)"
+
+        payload = build_telemetry_payload(
+            soup_version=__version__,
+            command=command,
+            duration_seconds=duration_seconds,
+        )
+        send_telemetry_payload(payload)
+    except Exception:
+        pass
+
+
 def run():
     """Entry point with friendly error handling."""
+    import time
+    start_time = time.monotonic()
+
     # v0.54.0 — rewrite `soup advise <data>` → `soup advise run <data>`.
     sys.argv = _rewrite_advise_argv(sys.argv)
     argv_snapshot = list(sys.argv)
@@ -838,6 +919,9 @@ def run():
         # Defensive/unreachable: app() raises SystemExit(0) on success under
         # click standalone mode, so this normal-return path rarely fires.
         _emit_audit_event(argv_snapshot, 0)
+    finally:
+        import time
+        _emit_telemetry(argv_snapshot, time.monotonic() - start_time)
 
 
 # When invoked via `soup` entry point, use run() for error handling.
