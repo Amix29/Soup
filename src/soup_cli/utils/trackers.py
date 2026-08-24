@@ -105,8 +105,9 @@ def is_telemetry_enabled(env: Mapping[str, str] | None = None) -> bool:
 
 def get_or_create_distinct_id() -> str:
     """Return the anonymous telemetry UUID, generating and persisting it if needed."""
-    from pathlib import Path
     import uuid
+    from pathlib import Path
+
     from soup_cli.utils.constants import SOUP_DIR
 
     id_file = Path.home() / SOUP_DIR / "telemetry_id"
