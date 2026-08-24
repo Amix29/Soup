@@ -352,6 +352,14 @@ class TestSendTelemetryPayload:
         # Must never raise
         assert send_telemetry_payload({"command": "train"}) is False
 
+    def test_build_telemetry_payload_distinct_id(self):
+        from soup_cli.utils.trackers import build_telemetry_payload
+
+        payload = build_telemetry_payload(soup_version="1.0", command="train")
+        assert "distinct_id" in payload
+        assert isinstance(payload["distinct_id"], str)
+        assert len(payload["distinct_id"]) > 0
+
 
 # ----------------------------------------------------------------------
 # #89 — Tracker missing-dep advisory
