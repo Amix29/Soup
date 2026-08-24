@@ -103,6 +103,28 @@ def is_telemetry_enabled(env: Mapping[str, str] | None = None) -> bool:
     return False
 
 
+def get_or_create_distinct_id() -> str:
+    """Return the anonymous telemetry UUID, generating and persisting it if needed."""
+    from pathlib import Path
+    import uuid
+    from soup_cli.utils.constants import SOUP_DIR
+
+    id_file = Path.home() / SOUP_DIR / "telemetry_id"
+    if id_file.exists():
+        try:
+            return id_file.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+
+    new_id = str(uuid.uuid4())
+    try:
+        id_file.parent.mkdir(parents=True, exist_ok=True)
+        id_file.write_text(new_id + "\n", encoding="utf-8")
+    except Exception:
+        pass
+    return new_id
+
+
 def build_telemetry_payload(
     *,
     soup_version: str,
@@ -120,6 +142,7 @@ def build_telemetry_payload(
       - `os`: platform.system()
       - `arch`: platform.machine()
       - `duration_seconds`: optional, finite float / int / None
+      - `distinct_id`: anonymous persistent UUID
 
     Raises ValueError for non-string `command` / `soup_version` and for
     non-finite `duration_seconds`.
@@ -154,8 +177,8 @@ def build_telemetry_payload(
         "duration_seconds": (
             float(duration_seconds) if duration_seconds is not None else None
         ),
+        "distinct_id": get_or_create_distinct_id(),
     }
-
 
 # v0.53.8 #90 — PostHog telemetry live wiring.
 # Opt-IN via SOUP_TELEMETRY=1; silent-fail on any network/transport error
