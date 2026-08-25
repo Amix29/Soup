@@ -152,6 +152,7 @@ class TestBuildTelemetryPayload:
             "os",
             "arch",
             "duration_seconds",
+            "distinct_id",
         }
 
     def test_invalid_version(self):
