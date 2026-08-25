@@ -260,6 +260,13 @@ lists. They must never discover training inputs by globbing neighboring JSONL
 files: an unlisted sidecar, including an older DPO stored elsewhere, is not part
 of the committed generation.
 
+Candidate export durably checkpoints each completed prompt group at
+`<artifact>.checkpoint.jsonl`. If sampling stops, rerun the same command with
+`--resume`; Soup authenticates the checkpoint against the prompts and sampler
+before continuing at the first incomplete group. Candidate and judgment inputs
+are validated through a temporary disk index, and final SFT/DPO files are staged
+incrementally, so memory does not grow with the complete artifact size.
+
 ### Custom Transforms
 
 Use a dotted-path string (`module.path:function_name`) as the ``transform``

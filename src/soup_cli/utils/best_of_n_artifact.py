@@ -100,6 +100,11 @@ def _validate_sampler(sampler: Any) -> dict:
     return sampler
 
 
+def validate_sampler_spec(sampler: Any) -> dict:
+    """Validate and return one public sampler specification."""
+    return _validate_sampler(sampler)
+
+
 def build_candidate_group(
     prompt: str,
     prompt_index: int,
@@ -137,15 +142,27 @@ def build_candidate_group(
     return {**core, "group_digest": _sha(core)}
 
 
-def candidate_artifact_text(groups: list[dict], sampler: dict) -> str:
+def candidate_artifact_header(prompt_count: int, sampler: dict) -> dict:
+    """Build the authenticated candidate-artifact header."""
     sampler = _validate_sampler(sampler)
-    header = {
+    if isinstance(prompt_count, bool) or not isinstance(prompt_count, int) or prompt_count < 1:
+        raise ValueError("candidate artifact prompt count is invalid")
+    return {
         "_best_of_n_candidates": {
             "schema": _CANDIDATE_SCHEMA,
-            "prompt_count": len(groups),
+            "prompt_count": prompt_count,
             "sampler": sampler,
         }
     }
+
+
+def stable_json_line(row: dict) -> bytes:
+    """Encode one canonical JSONL record as exact UTF-8 bytes."""
+    return _canonical(row) + b"\n"
+
+
+def candidate_artifact_text(groups: list[dict], sampler: dict) -> str:
+    header = candidate_artifact_header(len(groups), sampler)
     return "".join(
         json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
         for row in [header, *groups]
@@ -188,6 +205,48 @@ def _jsonl(data: bytes, field: str) -> list[dict]:
     return rows
 
 
+def validate_candidate_group(
+    group: Any,
+    index: int,
+    sampler: dict,
+    *,
+    expected_prompt: str | None = None,
+) -> str:
+    """Authenticate one candidate group and return its prompt id."""
+    if not isinstance(group, dict):
+        raise ValueError(f"candidate group {index} must be an object")
+    if group.get("prompt_index") != index or not isinstance(group.get("prompt"), str):
+        raise ValueError("candidate groups must be sequential")
+    source_line = group.get("source_line")
+    if (
+        isinstance(source_line, bool)
+        or not isinstance(source_line, int)
+        or source_line < 1
+    ):
+        raise ValueError(f"candidate group {index} has an invalid source line")
+    prompt = group["prompt"]
+    if expected_prompt is not None and prompt != expected_prompt:
+        raise ValueError(f"candidate group {index} does not match its source prompt")
+    expected_id = _sha({"prompt_index": index, "prompt": prompt})
+    if group.get("prompt_id") != expected_id:
+        raise ValueError(f"candidate group {index} has an invalid prompt id")
+    if group.get("prompt_sha256") != _sha(prompt.encode("utf-8")):
+        raise ValueError(f"candidate group {index} has a prompt digest mismatch")
+    candidates = group.get("candidates")
+    if not isinstance(candidates, list) or len(candidates) != sampler["n"]:
+        raise ValueError(f"candidate group {index} has the wrong candidate count")
+    for candidate_index, candidate in enumerate(candidates):
+        if not isinstance(candidate, dict) or candidate.get("index") != candidate_index:
+            raise ValueError(f"candidate group {index} has unordered candidates")
+        text = candidate.get("text")
+        if not isinstance(text, str) or candidate.get("sha256") != _sha(text.encode("utf-8")):
+            raise ValueError(f"candidate group {index} has a candidate digest mismatch")
+    core = {key: value for key, value in group.items() if key != "group_digest"}
+    if group.get("sampler") != sampler or group.get("group_digest") != _sha(core):
+        raise ValueError(f"candidate group {index} has a group digest mismatch")
+    return expected_id
+
+
 def load_candidate_artifact(path: str) -> tuple[list[dict], dict, str]:
     """Authenticate every group and return groups, public sampler spec, file hash."""
     data = _read_regular(path, "--candidate-artifact path")
@@ -205,34 +264,10 @@ def load_candidate_artifact(path: str) -> tuple[list[dict], dict, str]:
         raise ValueError("candidate artifact contains no prompt groups")
     seen_ids: set[str] = set()
     for index, group in enumerate(groups):
-        if group.get("prompt_index") != index or not isinstance(group.get("prompt"), str):
-            raise ValueError("candidate groups must be sequential")
-        source_line = group.get("source_line")
-        if (
-            isinstance(source_line, bool)
-            or not isinstance(source_line, int)
-            or source_line < 1
-        ):
-            raise ValueError(f"candidate group {index} has an invalid source line")
-        prompt = group["prompt"]
-        expected_id = _sha({"prompt_index": index, "prompt": prompt})
-        if group.get("prompt_id") != expected_id or expected_id in seen_ids:
+        prompt_id = validate_candidate_group(group, index, sampler)
+        if prompt_id in seen_ids:
             raise ValueError(f"candidate group {index} has an invalid prompt id")
-        seen_ids.add(expected_id)
-        if group.get("prompt_sha256") != _sha(prompt.encode("utf-8")):
-            raise ValueError(f"candidate group {index} has a prompt digest mismatch")
-        candidates = group.get("candidates")
-        if not isinstance(candidates, list) or len(candidates) != sampler["n"]:
-            raise ValueError(f"candidate group {index} has the wrong candidate count")
-        for candidate_index, candidate in enumerate(candidates):
-            if not isinstance(candidate, dict) or candidate.get("index") != candidate_index:
-                raise ValueError(f"candidate group {index} has unordered candidates")
-            text = candidate.get("text")
-            if not isinstance(text, str) or candidate.get("sha256") != _sha(text.encode("utf-8")):
-                raise ValueError(f"candidate group {index} has a candidate digest mismatch")
-        core = {key: value for key, value in group.items() if key != "group_digest"}
-        if group.get("sampler") != sampler or group.get("group_digest") != _sha(core):
-            raise ValueError(f"candidate group {index} has a group digest mismatch")
+        seen_ids.add(prompt_id)
     return groups, sampler, _sha(data)
 
 
@@ -249,12 +284,52 @@ def _verifier(value: Any, index: int) -> dict[str, str]:
     return clean
 
 
+def validate_judgment(row: Any, group: dict, index: int) -> dict:
+    """Validate one judgment against its exact candidate group."""
+    if not isinstance(row, dict):
+        raise ValueError(f"judgment {index} must be an object")
+    if row.get("prompt_id") != group["prompt_id"]:
+        raise ValueError(f"judgment {index} has a prompt id mismatch")
+    if row.get("group_digest") != group["group_digest"]:
+        raise ValueError(f"judgment {index} has a candidate digest mismatch")
+    winner_idx = row.get("winner_idx")
+    candidates = group["candidates"]
+    if isinstance(winner_idx, bool) or not isinstance(winner_idx, int):
+        raise ValueError(f"judgment {index} winner_idx must be an integer")
+    if not 0 <= winner_idx < len(candidates):
+        raise ValueError(f"judgment {index} winner_idx is out of range")
+    scores = row.get("scores")
+    if not isinstance(scores, list) or len(scores) != len(candidates):
+        raise ValueError(f"judgment {index} scores must match candidate count")
+    clean_scores = []
+    for score in scores:
+        if isinstance(score, bool) or not isinstance(score, (int, float)):
+            raise ValueError(f"judgment {index} scores must be numeric")
+        try:
+            number = float(score)
+        except (OverflowError, ValueError) as exc:
+            raise ValueError(f"judgment {index} scores must be finite") from exc
+        if not math.isfinite(number):
+            raise ValueError(f"judgment {index} scores must be finite")
+        clean_scores.append(number)
+    expected_winner = max(range(len(clean_scores)), key=clean_scores.__getitem__)
+    if winner_idx != expected_winner:
+        raise ValueError(f"judgment {index} winner_idx does not match its scores")
+    return {
+        "prompt_id": group["prompt_id"],
+        "group_digest": group["group_digest"],
+        "winner_idx": winner_idx,
+        "scores": clean_scores,
+        "verifier": _verifier(row.get("verifier"), index),
+    }
+
+
 def load_judgments(path: str, groups: list[dict]) -> tuple[list[dict], str]:
     """Validate complete one-to-one judgments against exact candidate groups."""
     data = _read_regular(path, "--judgments path")
     rows = _jsonl(data, "judgments")
     by_prompt: dict[str, dict] = {}
-    for index, row in enumerate(rows):
+    for row in rows:
         prompt_id = row.get("prompt_id")
         if not isinstance(prompt_id, str) or prompt_id in by_prompt:
             raise ValueError("judgments contain a missing or duplicate prompt_id")
@@ -265,41 +340,53 @@ def load_judgments(path: str, groups: list[dict]) -> tuple[list[dict], str]:
     validated = []
     for index, group in enumerate(groups):
         row = by_prompt[group["prompt_id"]]
-        if row.get("group_digest") != group["group_digest"]:
-            raise ValueError(f"judgment {index} has a candidate digest mismatch")
-        winner_idx = row.get("winner_idx")
-        candidates = group["candidates"]
-        if isinstance(winner_idx, bool) or not isinstance(winner_idx, int):
-            raise ValueError(f"judgment {index} winner_idx must be an integer")
-        if not 0 <= winner_idx < len(candidates):
-            raise ValueError(f"judgment {index} winner_idx is out of range")
-        scores = row.get("scores")
-        if not isinstance(scores, list) or len(scores) != len(candidates):
-            raise ValueError(f"judgment {index} scores must match candidate count")
-        clean_scores = []
-        for score in scores:
-            if isinstance(score, bool) or not isinstance(score, (int, float)):
-                raise ValueError(f"judgment {index} scores must be numeric")
-            try:
-                number = float(score)
-            except (OverflowError, ValueError) as exc:
-                raise ValueError(f"judgment {index} scores must be finite") from exc
-            if not math.isfinite(number):
-                raise ValueError(f"judgment {index} scores must be finite")
-            clean_scores.append(number)
-        expected_winner = max(range(len(clean_scores)), key=clean_scores.__getitem__)
-        if winner_idx != expected_winner:
-            raise ValueError(f"judgment {index} winner_idx does not match its scores")
-        validated.append(
-            {
-                "prompt_id": group["prompt_id"],
-                "group_digest": group["group_digest"],
-                "winner_idx": winner_idx,
-                "scores": clean_scores,
-                "verifier": _verifier(row.get("verifier"), index),
-            }
-        )
+        validated.append(validate_judgment(row, group, index))
     return validated, _sha(data)
+
+
+def materialize_group(
+    group: dict,
+    judgment: dict,
+    *,
+    sampler: dict,
+    candidate_artifact_sha256: str,
+    judgments_sha256: str,
+) -> tuple[dict, dict | None]:
+    """Produce one SFT row and optional DPO row from authenticated records."""
+    candidates = group["candidates"]
+    winner_idx = judgment["winner_idx"]
+    loser_idx = min(range(len(candidates)), key=judgment["scores"].__getitem__)
+    provenance = {
+        "mode": "offline",
+        "n": len(candidates),
+        "source_line": group["source_line"],
+        "winner_idx": winner_idx,
+        "scores": judgment["scores"],
+        "prompt_id": group["prompt_id"],
+        "candidate_group_digest": group["group_digest"],
+        "candidate_artifact_sha256": candidate_artifact_sha256,
+        "judgments_sha256": judgments_sha256,
+        "sampler": sampler,
+        "verifier": judgment["verifier"],
+    }
+    prompt = group["prompt"]
+    winner = candidates[winner_idx]["text"]
+    sft = {
+        "messages": [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": winner},
+        ],
+        "_best_of_n": provenance,
+    }
+    dpo = None
+    if loser_idx != winner_idx:
+        dpo = {
+            "prompt": prompt,
+            "chosen": winner,
+            "rejected": candidates[loser_idx]["text"],
+            "_best_of_n": provenance,
+        }
+    return sft, dpo
 
 
 def materialize_rows(
@@ -314,42 +401,16 @@ def materialize_rows(
     sft_rows = []
     dpo_rows = []
     for group, judgment in zip(groups, judgments):
-        candidates = group["candidates"]
-        winner_idx = judgment["winner_idx"]
-        loser_idx = min(range(len(candidates)), key=judgment["scores"].__getitem__)
-        provenance = {
-            "mode": "offline",
-            "n": len(candidates),
-            "source_line": group["source_line"],
-            "winner_idx": winner_idx,
-            "scores": judgment["scores"],
-            "prompt_id": group["prompt_id"],
-            "candidate_group_digest": group["group_digest"],
-            "candidate_artifact_sha256": candidate_artifact_sha256,
-            "judgments_sha256": judgments_sha256,
-            "sampler": sampler,
-            "verifier": judgment["verifier"],
-        }
-        prompt = group["prompt"]
-        winner = candidates[winner_idx]["text"]
-        sft_rows.append(
-            {
-                "messages": [
-                    {"role": "user", "content": prompt},
-                    {"role": "assistant", "content": winner},
-                ],
-                "_best_of_n": provenance,
-            }
+        sft, dpo = materialize_group(
+            group,
+            judgment,
+            sampler=sampler,
+            candidate_artifact_sha256=candidate_artifact_sha256,
+            judgments_sha256=judgments_sha256,
         )
-        if loser_idx != winner_idx:
-            dpo_rows.append(
-                {
-                    "prompt": prompt,
-                    "chosen": winner,
-                    "rejected": candidates[loser_idx]["text"],
-                    "_best_of_n": provenance,
-                }
-            )
+        sft_rows.append(sft)
+        if dpo is not None:
+            dpo_rows.append(dpo)
     return sft_rows, dpo_rows
 
 
@@ -372,16 +433,44 @@ def offline_manifest_text(
     dpo_count: int,
 ) -> str:
     """Build the final commit marker for one offline materialization."""
+    if not isinstance(sft_bytes, bytes) or not isinstance(dpo_bytes, bytes):
+        raise TypeError("offline dataset payloads must be bytes")
+    return offline_manifest_from_digests(
+        candidate_artifact_sha256=candidate_artifact_sha256,
+        judgments_sha256=judgments_sha256,
+        sft_path=sft_path,
+        sft_sha256=_sha(sft_bytes),
+        sft_count=sft_count,
+        dpo_path=dpo_path,
+        dpo_sha256=_sha(dpo_bytes),
+        dpo_count=dpo_count,
+    )
+
+
+def offline_manifest_from_digests(
+    *,
+    candidate_artifact_sha256: str,
+    judgments_sha256: str,
+    sft_path: str,
+    sft_sha256: str,
+    sft_count: int,
+    dpo_path: str,
+    dpo_sha256: str,
+    dpo_count: int,
+) -> str:
+    """Build an offline commit marker from incrementally computed digests."""
     if not _SHA256_VALUE.fullmatch(candidate_artifact_sha256):
         raise ValueError("candidate artifact SHA-256 is invalid")
     if not _SHA256_VALUE.fullmatch(judgments_sha256):
         raise ValueError("judgments SHA-256 is invalid")
+    if not _SHA256_VALUE.fullmatch(sft_sha256):
+        raise ValueError("SFT SHA-256 is invalid")
+    if not _SHA256_VALUE.fullmatch(dpo_sha256):
+        raise ValueError("DPO SHA-256 is invalid")
     if isinstance(sft_count, bool) or not isinstance(sft_count, int) or sft_count < 0:
         raise ValueError("SFT row count is invalid")
     if isinstance(dpo_count, bool) or not isinstance(dpo_count, int) or dpo_count < 0:
         raise ValueError("DPO row count is invalid")
-    if not isinstance(sft_bytes, bytes) or not isinstance(dpo_bytes, bytes):
-        raise TypeError("offline dataset payloads must be bytes")
     dpo_requested = bool(dpo_path)
     manifest = {
         "schema": _OFFLINE_MANIFEST_SCHEMA,
@@ -391,13 +480,13 @@ def offline_manifest_text(
         "sft": {
             "file": os.path.basename(sft_path),
             "rows": sft_count,
-            "sha256": _sha(sft_bytes),
+            "sha256": sft_sha256,
         },
         "dpo": (
             {
                 "file": os.path.basename(dpo_path),
                 "rows": dpo_count,
-                "sha256": _sha(dpo_bytes),
+                "sha256": dpo_sha256,
             }
             if dpo_requested
             else None

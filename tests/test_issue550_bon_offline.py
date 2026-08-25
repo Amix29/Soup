@@ -302,17 +302,16 @@ def test_failed_dpo_replacement_restores_previous_generation(tmp_path, monkeypat
     assert manifest_path.exists()
     previous = (sft.read_bytes(), dpo.read_bytes(), manifest_path.read_bytes())
 
-    real_replace = __import__("os").replace
-    failed_once = False
+    def fail_dpo(staged, sft_path, _dpo_path):
+        import os
 
-    def fail_dpo(source, destination):
-        nonlocal failed_once
-        if not failed_once and destination == str(dpo):
-            failed_once = True
-            raise OSError("simulated DPO publication failure")
-        return real_replace(source, destination)
+        os.replace(staged.sft_temp, sft_path)
+        staged.sft_temp = ""
+        raise OSError("simulated DPO publication failure")
 
-    monkeypatch.setattr("os.replace", fail_dpo)
+    monkeypatch.setattr(
+        "soup_cli.utils.best_of_n_stream.publish_staged_datasets", fail_dpo
+    )
     failed = CliRunner().invoke(app, args)
     assert failed.exit_code == 1
     assert (sft.read_bytes(), dpo.read_bytes(), manifest_path.read_bytes()) == previous
