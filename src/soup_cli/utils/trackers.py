@@ -111,11 +111,11 @@ def get_or_create_distinct_id() -> str:
     from soup_cli.utils.constants import SOUP_DIR
 
     id_file = Path.home() / SOUP_DIR / "telemetry_id"
-    if id_file.exists():
-        try:
+    try:
+        if id_file.exists():
             return id_file.read_text(encoding="utf-8").strip()
-        except Exception:
-            pass
+    except Exception:
+        pass
 
     new_id = str(uuid.uuid4())
     try:

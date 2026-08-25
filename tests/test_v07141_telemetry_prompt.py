@@ -1,7 +1,4 @@
-import pytest
 import os
-import sys
-from pathlib import Path
 from unittest.mock import patch
 
 
@@ -65,8 +62,8 @@ def test_handle_telemetry_consent_exception(tmp_path, monkeypatch):
 
 
 def test_emit_telemetry_disabled():
-    from soup_cli.cli import _emit_telemetry
     import soup_cli.cli as cli
+    from soup_cli.cli import _emit_telemetry
 
     cli._telemetry_disabled = True
     _emit_telemetry(["soup"], 1.0)
