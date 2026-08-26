@@ -84,6 +84,11 @@ V07124_MOE_RECIPES = [
     "mistral-large-3-sft",
 ]
 
+ISSUE512_RECIPE_BASES = {
+    "kimi-k2.6-grpo": "moonshotai/Kimi-K2.6",
+    "qwen3.5-35b-a3b-dpo": "Qwen/Qwen3.5-35B-A3B",
+}
+
 
 class TestV07124Recipes:
     def test_recipe_count_target(self) -> None:
@@ -97,6 +102,14 @@ class TestV07124Recipes:
     @pytest.mark.parametrize("name", V07124_RECIPE_NAMES)
     def test_recipe_base_matches_verified_repo(self, name: str) -> None:
         assert RECIPES[name].model == V07124_RECIPE_BASES[name]
+
+    @pytest.mark.parametrize(("name", "expected_repo"), ISSUE512_RECIPE_BASES.items())
+    def test_issue512_recipe_repo_id_is_pinned(
+        self, name: str, expected_repo: str
+    ) -> None:
+        meta = RECIPES[name]
+        assert meta.model == expected_repo
+        assert yaml.safe_load(meta.yaml_str)["base"] == expected_repo
 
     @pytest.mark.parametrize("name", V07124_RECIPE_NAMES)
     def test_recipe_is_sft(self, name: str) -> None:
