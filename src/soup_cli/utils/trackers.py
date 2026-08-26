@@ -113,7 +113,9 @@ def get_or_create_distinct_id() -> str:
     id_file = Path.home() / SOUP_DIR / "telemetry_id"
     try:
         if id_file.exists():
-            return id_file.read_text(encoding="utf-8").strip()
+            saved = id_file.read_text(encoding="utf-8").strip()
+            if str(uuid.UUID(saved)) == saved.lower():
+                return saved
     except Exception:
         pass
 
@@ -305,18 +307,29 @@ def send_telemetry_payload(
     if resolved is None:
         return False
     key, endpoint = resolved
-    try:
-        import httpx  # lazy — optional dep, surfaces no advisory
-    except ImportError:
-        return False
     body = {
         "api_key": key,
         "event": payload.get("command", "soup_event"),
         "properties": {k: v for k, v in payload.items() if k != "command"},
     }
     try:
-        resp = httpx.post(endpoint, json=body, timeout=timeout)
-        return 200 <= resp.status_code < 300
+        import json
+        from urllib import request
+
+        encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+        req = request.Request(
+            endpoint,
+            data=encoded,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with request.urlopen(req, timeout=float(timeout)) as response:
+            status = getattr(response, "status", None)
+            if not isinstance(status, int):
+                status = response.getcode()
+            return isinstance(status, int) and 200 <= status < 300
     except Exception:  # noqa: BLE001 — telemetry must never crash training
         return False
 

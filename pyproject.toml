@@ -45,7 +45,6 @@ dependencies = [
     # a silent "clean" without it — the wrong direction for a checker — so it is
     # declared explicitly (#368 review).
     "packaging>=21.0",
-    "httpx>=0.24.0",
 ]
 
 [project.optional-dependencies]

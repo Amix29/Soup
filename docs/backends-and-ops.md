@@ -526,14 +526,15 @@ pip install mlflow      # or: swanlab / trackio
 
 Soup ships a hardware-info-only telemetry payload (Soup version + command +
 Python major.minor + OS + arch + duration). It is **off by default** and never
-sends model names, dataset paths, or config contents. Enable explicitly:
+sends model names, dataset paths, or config contents. The environment variable
+is the only opt-in mechanism:
 
 ```bash
 SOUP_TELEMETRY=1 soup train --config soup.yaml
 ```
 
-The PostHog network upload itself is deferred to v0.43.1; v0.43.0 ships the
-payload schema only so you can audit it before opting in.
+See the [telemetry privacy policy](#privacy-policy) below for the complete
+allowlist and delivery guarantees.
 
 
 ## Profiling Extras
@@ -769,16 +770,15 @@ pip install soup-cli[trackers]   # mlflow + swanlab + trackio
 
 ## Telemetry (opt-in)
 
-Soup ships a hardware-info-only telemetry payload (Soup version + command + Python major.minor + OS + arch + duration). It is **off by default** and never sends model names, dataset paths, or config contents. It runs asynchronously behind a 1-second hard timeout and swallows all exceptions so telemetry can never crash training.
+Soup ships a hardware-info-only telemetry payload (Soup version + command + Python major.minor + OS + arch + duration). It is **off by default** and never sends model names, dataset paths, or config contents. Delivery has a 1-second hard timeout and swallows all exceptions so telemetry can never crash training.
 
-To enable it, you can opt in during the first-run prompt in the CLI, or explicitly set the environment variable:
+There is no prompt or persistent consent file. The environment variable is the
+single opt-in switch:
 ```bash
 SOUP_TELEMETRY=1 soup train --config soup.yaml
 ```
-To explicitly disable it without being prompted, use the flag:
-```bash
-soup --no-telemetry train --config soup.yaml
-```
+When the variable is unset, `0`, or any value other than the documented true
+values, Soup performs no telemetry network request.
 
 ### Privacy Policy
 

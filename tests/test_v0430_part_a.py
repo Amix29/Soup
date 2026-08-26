@@ -140,7 +140,7 @@ class TestBuildTelemetryPayload:
         assert isinstance(payload["duration_seconds"], float)
 
     def test_no_user_data_in_payload(self):
-        # Schema invariant: no model name / dataset path / user identifier.
+        # Schema invariant: no model name, dataset path, or user-derived identifier.
         payload = build_telemetry_payload(
             soup_version="0.43.0", command="train"
         )
