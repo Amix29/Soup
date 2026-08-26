@@ -30,15 +30,29 @@ def _sha(value: Any) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def sampler_identity_fingerprint(*parts: str) -> str:
+    """Return a privacy-safe identity pin for a sampler source or endpoint."""
+    if not parts or not all(isinstance(part, str) and part for part in parts):
+        raise ValueError("sampler identity parts must be non-empty strings")
+    return _sha({"identity": list(parts)})
+
+
+def prompt_seed(seed: int, index: int) -> int:
+    """Derive a stable torch seed for one prompt, independent of resume position."""
+    encoded = f"{seed}:{index}".encode("ascii")
+    return int.from_bytes(hashlib.sha256(encoded).digest()[:8], "big") & ((1 << 63) - 1)
+
+
 def _validate_sampler(sampler: Any) -> dict:
     if not isinstance(sampler, dict):
         raise ValueError("candidate sampler specification must be an object")
     kind = sampler.get("kind")
     common = {"kind", "model", "n", "temperature", "max_new_tokens"}
     expected = (
-        common | {"provider"}
+        common | {"provider", "endpoint_fingerprint"}
         if kind == "provider"
-        else common | {"revision", "device", "seed", "trust_remote_code"}
+        else common
+        | {"revision", "device", "seed", "trust_remote_code", "model_fingerprint"}
     )
     if kind not in {"provider", "local"} or set(sampler) != expected:
         raise ValueError("candidate sampler specification has unsupported fields")
@@ -75,6 +89,10 @@ def _validate_sampler(sampler: Any) -> dict:
     if kind == "provider":
         if sampler.get("provider") not in {"ollama", "vllm"}:
             raise ValueError("candidate sampler provider is invalid")
+        if not isinstance(sampler.get("endpoint_fingerprint"), str) or not (
+            _SHA256_VALUE.fullmatch(sampler["endpoint_fingerprint"])
+        ):
+            raise ValueError("candidate sampler endpoint fingerprint is invalid")
     else:
         revision = sampler.get("revision")
         if (
@@ -97,6 +115,10 @@ def _validate_sampler(sampler: Any) -> dict:
             raise ValueError("candidate sampler seed is invalid")
         if not isinstance(sampler.get("trust_remote_code"), bool):
             raise ValueError("candidate sampler trust flag is invalid")
+        if not isinstance(sampler.get("model_fingerprint"), str) or not (
+            _SHA256_VALUE.fullmatch(sampler["model_fingerprint"])
+        ):
+            raise ValueError("candidate sampler model fingerprint is invalid")
     return sampler
 
 

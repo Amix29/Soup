@@ -81,6 +81,8 @@ def _write_judgments(path, groups):
 def test_candidate_export_needs_no_judge_and_preserves_order_and_digests(
     tmp_path, monkeypatch
 ):
+    from soup_cli.utils.best_of_n_artifact import sampler_identity_fingerprint
+
     artifact, calls = _export_candidates(tmp_path, monkeypatch)
     assert calls == ["question one", "question one", "question two", "question two"]
     records = [json.loads(line) for line in artifact.read_text().splitlines()]
@@ -90,6 +92,9 @@ def test_candidate_export_needs_no_judge_and_preserves_order_and_digests(
         "kind": "provider",
         "provider": "ollama",
         "model": "sampler-model",
+        "endpoint_fingerprint": sampler_identity_fingerprint(
+            "provider-endpoint", "http://localhost:11434/private-route"
+        ),
         "n": 2,
         "temperature": 1.0,
         "max_new_tokens": 256,

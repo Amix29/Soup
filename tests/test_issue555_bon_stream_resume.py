@@ -7,6 +7,8 @@ import json
 import pytest
 from typer.testing import CliRunner
 
+_FINGERPRINT = "0" * 64
+
 
 def _args(tmp_path):
     return [
@@ -21,6 +23,23 @@ def _args(tmp_path):
         "2",
         "--export-candidates",
         str(tmp_path / "candidates.jsonl"),
+    ]
+
+
+def _local_args(tmp_path, model_path, *extra):
+    return [
+        "best-of-n",
+        "--base",
+        str(model_path),
+        "--prompts",
+        str(tmp_path / "prompts.jsonl"),
+        "--n",
+        "2",
+        "--seed",
+        "23",
+        "--export-candidates",
+        str(tmp_path / "candidates.jsonl"),
+        *extra,
     ]
 
 
@@ -110,6 +129,7 @@ def test_offline_large_artifacts_bypass_whole_file_materializers(tmp_path, monke
         "kind": "provider",
         "provider": "ollama",
         "model": "sampler-model",
+        "endpoint_fingerprint": _FINGERPRINT,
         "n": 2,
         "temperature": 1.0,
         "max_new_tokens": 256,
@@ -145,6 +165,16 @@ def test_offline_large_artifacts_bypass_whole_file_materializers(tmp_path, monke
     monkeypatch.setattr("soup_cli.utils.best_of_n_artifact.load_judgments", forbidden)
     monkeypatch.setattr("soup_cli.utils.best_of_n_artifact.materialize_rows", forbidden)
     monkeypatch.setattr("soup_cli.utils.best_of_n_artifact.stable_jsonl", forbidden)
+    from soup_cli.utils.best_of_n_stream import OfflineArtifactIndex
+
+    real_iter_rows = OfflineArtifactIndex.iter_rows
+    iteration_count = {"value": 0}
+
+    def counted_iter_rows(self):
+        iteration_count["value"] += 1
+        yield from real_iter_rows(self)
+
+    monkeypatch.setattr(OfflineArtifactIndex, "iter_rows", counted_iter_rows)
     sft = tmp_path / "sft.jsonl"
     dpo = tmp_path / "dpo.jsonl"
     result = CliRunner().invoke(
@@ -164,6 +194,7 @@ def test_offline_large_artifacts_bypass_whole_file_materializers(tmp_path, monke
     assert result.exit_code == 0, (result.output, repr(result.exception))
     assert sum(1 for _ in sft.open(encoding="utf-8")) == count
     assert sum(1 for _ in dpo.open(encoding="utf-8")) == count
+    assert iteration_count["value"] == 1
     verify_offline_manifest(
         str(tmp_path / "sft.jsonl.manifest.json"),
         sft_path=str(sft),
@@ -187,6 +218,7 @@ def test_streaming_candidate_structure_failures_never_commit_manifest(
         "kind": "provider",
         "provider": "ollama",
         "model": "sampler-model",
+        "endpoint_fingerprint": _FINGERPRINT,
         "n": 2,
         "temperature": 1.0,
         "max_new_tokens": 256,
@@ -220,3 +252,134 @@ def test_streaming_candidate_structure_failures_never_commit_manifest(
     assert result.exit_code == 2
     assert not output.exists()
     assert not (tmp_path / "sft.jsonl.manifest.json").exists()
+
+
+def test_resume_discards_an_uncommitted_candidate_tail(tmp_path, monkeypatch):
+    from soup_cli.utils.best_of_n_artifact import build_candidate_group
+    from soup_cli.utils.best_of_n_stream import (
+        append_candidate_group,
+        prepare_candidate_checkpoint,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    sampler = {
+        "kind": "provider",
+        "provider": "ollama",
+        "model": "sampler-model",
+        "endpoint_fingerprint": _FINGERPRINT,
+        "n": 2,
+        "temperature": 1.0,
+        "max_new_tokens": 256,
+    }
+    prompts = ["q1", "q2"]
+    checkpoint = tmp_path / "checkpoint.jsonl"
+    assert prepare_candidate_checkpoint(
+        str(checkpoint), prompts, sampler, resume=False
+    ) == 0
+    append_candidate_group(
+        str(checkpoint), build_candidate_group("q1", 0, ["a", "b"], sampler)
+    )
+    with checkpoint.open("ab") as handle:
+        handle.write(b'{"prompt_index":1,"prompt":')
+
+    completed = prepare_candidate_checkpoint(
+        str(checkpoint), prompts, sampler, resume=True
+    )
+
+    assert completed == 1
+    assert checkpoint.read_bytes().endswith(b"\n")
+
+
+def test_resume_rejects_provider_endpoint_drift(tmp_path, monkeypatch):
+    from soup_cli.commands.data import app
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "prompts.jsonl").write_text('{"prompt":"q"}\n', encoding="utf-8")
+    monkeypatch.setattr(
+        "soup_cli.utils.magpie.make_magpie_generate_fn",
+        lambda *_args, **_kwargs: lambda _prompt: "candidate",
+    )
+    first = CliRunner().invoke(app, _args(tmp_path))
+    assert first.exit_code == 0, (first.output, repr(first.exception))
+
+    changed = [*_args(tmp_path), "--resume", "--base-url", "http://localhost:11435"]
+    resumed = CliRunner().invoke(app, changed)
+
+    assert resumed.exit_code == 1
+    assert "does not match this run" in resumed.output
+
+
+def test_resume_rejects_a_different_private_local_model(tmp_path, monkeypatch):
+    from soup_cli.commands.data import app
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "prompts.jsonl").write_text('{"prompt":"q"}\n', encoding="utf-8")
+    model_a = tmp_path / "model-a"
+    model_b = tmp_path / "model-b"
+    model_a.mkdir()
+    model_b.mkdir()
+    monkeypatch.setattr(
+        "soup_cli.utils.trust_remote.model_requires_trust_remote_code",
+        lambda _model: False,
+    )
+    monkeypatch.setattr(
+        "soup_cli.commands.data._load_bon_model", lambda *_args, **_kwargs: (object(), object())
+    )
+    monkeypatch.setattr(
+        "soup_cli.utils.best_of_n.sample_candidates",
+        lambda *_args, n, **_kwargs: [f"candidate-{i}" for i in range(n)],
+    )
+
+    first = CliRunner().invoke(app, _local_args(tmp_path, model_a))
+    assert first.exit_code == 0, (first.output, repr(first.exception))
+    resumed = CliRunner().invoke(
+        app, _local_args(tmp_path, model_b, "--resume")
+    )
+
+    assert resumed.exit_code == 1
+    assert "does not match this run" in resumed.output
+    artifact_text = (tmp_path / "candidates.jsonl").read_text(encoding="utf-8")
+    assert str(model_a) not in artifact_text
+    assert str(model_b) not in artifact_text
+
+
+def test_local_resume_reuses_the_same_prompt_seed(tmp_path, monkeypatch):
+    import torch
+
+    from soup_cli.commands.data import app
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "prompts.jsonl").write_text(
+        '{"prompt":"first"}\n{"prompt":"second"}\n', encoding="utf-8"
+    )
+    model = tmp_path / "model"
+    model.mkdir()
+    monkeypatch.setattr(
+        "soup_cli.utils.trust_remote.model_requires_trust_remote_code",
+        lambda _model: False,
+    )
+    monkeypatch.setattr(
+        "soup_cli.commands.data._load_bon_model", lambda *_args, **_kwargs: (object(), object())
+    )
+    sampled = []
+    fail_second = {"value": True}
+
+    def sample_candidates(_model, _tokenizer, prompt, *, n, **_kwargs):
+        values = [f"{torch.rand(1).item():.12f}" for _ in range(n)]
+        sampled.append((prompt, values))
+        if prompt == "second" and fail_second["value"]:
+            raise RuntimeError("simulated interruption")
+        return values
+
+    monkeypatch.setattr(
+        "soup_cli.utils.best_of_n.sample_candidates", sample_candidates
+    )
+    first = CliRunner().invoke(app, _local_args(tmp_path, model))
+    assert first.exit_code == 1, (first.output, repr(first.exception))
+    interrupted = sampled[-1][1]
+
+    fail_second["value"] = False
+    resumed = CliRunner().invoke(app, _local_args(tmp_path, model, "--resume"))
+
+    assert resumed.exit_code == 0, (resumed.output, repr(resumed.exception))
+    assert sampled[-1] == ("second", interrupted)

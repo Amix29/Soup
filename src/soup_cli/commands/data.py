@@ -3164,21 +3164,26 @@ def best_of_n(
             with bon_stream.index_offline_artifacts(
                 candidate_artifact, judgments
             ) as offline_index:
-                offline_index.validate_all()
                 console.print(
                     Panel(
                         f"Candidate groups: [bold]{offline_index.group_count}[/]\n"
-                        f"Verified rows:    [bold]{offline_index.group_count}[/]\n"
+                        f"Matched rows:     [bold]{offline_index.group_count}[/]\n"
                         "Network/model:    [bold]disabled[/]",
                         title="soup data best-of-n — offline plan",
                     )
                 )
                 if plan_only:
+                    offline_index.validate_all()
                     return
-                publication_started = True
                 staged = bon_stream.stage_offline_datasets(
                     offline_index, output, emit_pairs
                 )
+                if staged.sft_count != offline_index.group_count:
+                    staged.cleanup()
+                    raise ValueError(
+                        "judgments must cover every candidate group exactly once"
+                    )
+                publication_started = True
                 try:
                     manifest_bytes = bon_artifact.offline_manifest_from_digests(
                         candidate_artifact_sha256=offline_index.candidate_sha256,
@@ -3333,10 +3338,17 @@ def best_of_n(
 
     sampler_label = f"{sampling_provider}:{model}" if generate_fn is not None else base
     if generate_fn is not None:
+        default_endpoint = {
+            "ollama": "http://localhost:11434",
+            "vllm": "http://localhost:8000",
+        }[sampling_provider]
         sampler_spec = {
             "kind": "provider",
             "provider": sampling_provider,
             "model": model,
+            "endpoint_fingerprint": bon_artifact.sampler_identity_fingerprint(
+                "provider-endpoint", base_url or default_endpoint
+            ),
             "n": n,
             "temperature": temperature,
             "max_new_tokens": max_new_tokens,
@@ -3344,9 +3356,13 @@ def best_of_n(
     else:
         is_local_path = os.path.exists(base) or os.path.isabs(base) or ntpath.isabs(base)
         public_model = "<local-model>" if is_local_path else base
+        model_identity = os.path.realpath(base) if is_local_path else base
         sampler_spec = {
             "kind": "local",
             "model": public_model,
+            "model_fingerprint": bon_artifact.sampler_identity_fingerprint(
+                "local-model", model_identity, revision or "unspecified"
+            ),
             "revision": revision or "unspecified",
             "n": n,
             "temperature": temperature,
@@ -3488,14 +3504,10 @@ def best_of_n(
     local_model = None
     tokenizer = None
     local_torch = None
-    if generate_fn is None and (
-        export_mode or len(completed_entries) < len(prompt_list)
-    ):
+    if generate_fn is None and len(completed_entries) < len(prompt_list):
         import torch
 
         local_torch = torch
-        if export_mode:
-            torch.manual_seed(seed)
         if revision:
             local_model, tokenizer = _load_bon_model(
                 base, device, trust, revision=revision
