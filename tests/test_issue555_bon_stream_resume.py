@@ -115,6 +115,32 @@ def test_resume_rejects_changed_prompt_contract_before_sampling(tmp_path, monkey
     assert calls == []
 
 
+def test_resume_rejects_changed_prompt_source_line_before_sampling(tmp_path, monkeypatch):
+    from soup_cli.commands.data import app
+
+    monkeypatch.chdir(tmp_path)
+    prompts = tmp_path / "prompts.jsonl"
+    prompts.write_text('{"prompt":"same"}\n', encoding="utf-8")
+    monkeypatch.setattr(
+        "soup_cli.utils.magpie.make_magpie_generate_fn",
+        lambda *_args, **_kwargs: lambda _prompt: "candidate",
+    )
+    first = CliRunner().invoke(app, _args(tmp_path))
+    assert first.exit_code == 0, (first.output, repr(first.exception))
+
+    prompts.write_text('\n{"prompt":"same"}\n', encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(
+        "soup_cli.utils.magpie.make_magpie_generate_fn",
+        lambda *_args, **_kwargs: lambda prompt: calls.append(prompt) or "unexpected",
+    )
+    resumed = CliRunner().invoke(app, [*_args(tmp_path), "--resume"])
+
+    assert resumed.exit_code == 1
+    assert "does not match this run" in resumed.output
+    assert calls == []
+
+
 def test_offline_large_artifacts_bypass_whole_file_materializers(tmp_path, monkeypatch):
     from soup_cli.commands.data import app
     from soup_cli.utils.best_of_n_artifact import (
@@ -143,7 +169,11 @@ def test_offline_large_artifacts_bypass_whole_file_materializers(tmp_path, monke
         candidate_file.write(stable_json_line(candidate_artifact_header(count, sampler)))
         for index in range(count):
             group = build_candidate_group(
-                f"prompt-{index}", index, [f"loser-{index}", f"winner-{index}"], sampler
+                f"prompt-{index}",
+                index,
+                [f"loser-{index}", f"winner-{index}"],
+                sampler,
+                source_line=index + 1,
             )
             candidate_file.write(stable_json_line(group))
             judgment_file.write(
@@ -224,7 +254,9 @@ def test_streaming_candidate_structure_failures_never_commit_manifest(
         "max_new_tokens": 256,
     }
     groups = [
-        build_candidate_group(f"q{index}", index, ["a", "b"], sampler)
+        build_candidate_group(
+            f"q{index}", index, ["a", "b"], sampler, source_line=index + 1
+        )
         for index in range(2)
     ]
     records = [candidate_artifact_header(2, sampler), *groups]
@@ -277,7 +309,8 @@ def test_resume_discards_an_uncommitted_candidate_tail(tmp_path, monkeypatch):
         str(checkpoint), prompts, sampler, resume=False
     ) == 0
     append_candidate_group(
-        str(checkpoint), build_candidate_group("q1", 0, ["a", "b"], sampler)
+        str(checkpoint),
+        build_candidate_group("q1", 0, ["a", "b"], sampler, source_line=1),
     )
     with checkpoint.open("ab") as handle:
         handle.write(b'{"prompt_index":1,"prompt":')
@@ -341,6 +374,46 @@ def test_resume_rejects_a_different_private_local_model(tmp_path, monkeypatch):
     artifact_text = (tmp_path / "candidates.jsonl").read_text(encoding="utf-8")
     assert str(model_a) not in artifact_text
     assert str(model_b) not in artifact_text
+
+
+def test_resume_rejects_replaced_content_at_the_same_local_model_path(
+    tmp_path, monkeypatch
+):
+    from soup_cli.commands.data import app
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "prompts.jsonl").write_text('{"prompt":"q"}\n', encoding="utf-8")
+    model = tmp_path / "model"
+    model.mkdir()
+    weights = model / "weights.bin"
+    weights.write_bytes(b"first-content")
+    load_calls = []
+    monkeypatch.setattr(
+        "soup_cli.utils.trust_remote.model_requires_trust_remote_code",
+        lambda _model: False,
+    )
+    monkeypatch.setattr(
+        "soup_cli.commands.data._load_bon_model",
+        lambda *_args, **_kwargs: (
+            load_calls.append(True) or (object(), object())
+        ),
+    )
+    monkeypatch.setattr(
+        "soup_cli.utils.best_of_n.sample_candidates",
+        lambda *_args, n, **_kwargs: [f"candidate-{index}" for index in range(n)],
+    )
+
+    first = CliRunner().invoke(app, _local_args(tmp_path, model))
+    assert first.exit_code == 0, (first.output, repr(first.exception))
+    assert load_calls == [True]
+
+    weights.write_bytes(b"other-content")
+    load_calls.clear()
+    resumed = CliRunner().invoke(app, _local_args(tmp_path, model, "--resume"))
+
+    assert resumed.exit_code == 1
+    assert "does not match this run" in resumed.output
+    assert load_calls == []
 
 
 def test_local_resume_reuses_the_same_prompt_seed(tmp_path, monkeypatch):

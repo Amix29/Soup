@@ -16,6 +16,7 @@ from soup_cli.utils import best_of_n_artifact as artifact
 from soup_cli.utils.paths import enforce_under_cwd_and_no_symlink
 
 _CHECKPOINT_SCHEMA = "soup.best_of_n.candidate_checkpoint.v1"
+PromptRecord = tuple[str, int]
 
 
 def _write_all(fd: int, data: bytes) -> None:
@@ -28,8 +29,35 @@ def _write_all(fd: int, data: bytes) -> None:
         view = view[written:]
 
 
-def _run_digest(prompts: list[str], sampler: dict) -> str:
-    payload = {"prompts": prompts, "sampler": sampler}
+def _normalise_prompt_records(prompts: list[str] | list[PromptRecord]) -> list[PromptRecord]:
+    records: list[PromptRecord] = []
+    for index, value in enumerate(prompts):
+        if isinstance(value, str):
+            record = (value, index + 1)
+        elif (
+            isinstance(value, tuple)
+            and len(value) == 2
+            and isinstance(value[0], str)
+            and isinstance(value[1], int)
+            and not isinstance(value[1], bool)
+            and value[1] > 0
+        ):
+            record = value
+        else:
+            raise ValueError("candidate checkpoint prompts are invalid")
+        records.append(record)
+    return records
+
+
+def _run_digest(prompts: list[str] | list[PromptRecord], sampler: dict) -> str:
+    records = _normalise_prompt_records(prompts)
+    payload = {
+        "prompts": [
+            {"prompt": prompt, "source_line": source_line}
+            for prompt, source_line in records
+        ],
+        "sampler": sampler,
+    }
     data = json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
@@ -65,12 +93,13 @@ def _regular_binary_lines(path: str, field: str) -> Iterator[Iterator[tuple[int,
             os.close(fd)
 
 
-def _checkpoint_header(prompts: list[str], sampler: dict) -> dict:
+def _checkpoint_header(prompts: list[str] | list[PromptRecord], sampler: dict) -> dict:
+    records = _normalise_prompt_records(prompts)
     return {
         "_best_of_n_checkpoint": {
             "schema": _CHECKPOINT_SCHEMA,
-            "run_digest": _run_digest(prompts, sampler),
-            "prompt_count": len(prompts),
+            "run_digest": _run_digest(records, sampler),
+            "prompt_count": len(records),
             "sampler": sampler,
         }
     }
@@ -109,12 +138,17 @@ def _discard_incomplete_checkpoint_tail(path: str) -> None:
 
 
 def prepare_candidate_checkpoint(
-    path: str, prompts: list[str], sampler: dict, *, resume: bool
+    path: str,
+    prompts: list[str] | list[PromptRecord],
+    sampler: dict,
+    *,
+    resume: bool,
 ) -> int:
     """Create or authenticate a checkpoint and return completed group count."""
     sampler = artifact.validate_sampler_spec(sampler)
     enforce_under_cwd_and_no_symlink(path, "--checkpoint path")
-    expected_header = _checkpoint_header(prompts, sampler)
+    records = _normalise_prompt_records(prompts)
+    expected_header = _checkpoint_header(records, sampler)
     exists = os.path.lexists(path)
     if not exists:
         if resume:
@@ -145,10 +179,15 @@ def prepare_candidate_checkpoint(
                     raise ValueError("candidate checkpoint does not match this run")
                 saw_header = True
                 continue
-            if completed >= len(prompts):
+            if completed >= len(records):
                 raise ValueError("candidate checkpoint has too many groups")
+            expected_prompt, expected_source_line = records[completed]
             artifact.validate_candidate_group(
-                row, completed, sampler, expected_prompt=prompts[completed]
+                row,
+                completed,
+                sampler,
+                expected_prompt=expected_prompt,
+                expected_source_line=expected_source_line,
             )
             completed += 1
     if not saw_header:
@@ -178,20 +217,21 @@ def append_candidate_group(path: str, group: dict) -> None:
 def publish_candidate_checkpoint(
     checkpoint: str,
     output: str,
-    prompts: list[str],
+    prompts: list[str] | list[PromptRecord],
     sampler: dict,
 ) -> None:
     """Stream a complete checkpoint into one atomically published artifact."""
     enforce_under_cwd_and_no_symlink(output, "--export-candidates path")
     parent = os.path.dirname(os.path.abspath(output)) or "."
     os.makedirs(parent, exist_ok=True)
+    records = _normalise_prompt_records(prompts)
     fd, staging = tempfile.mkstemp(prefix=".soup-bon-candidates.", dir=parent)
     try:
         with os.fdopen(fd, "wb") as target:
             fd = -1
             target.write(
                 artifact.stable_json_line(
-                    artifact.candidate_artifact_header(len(prompts), sampler)
+                    artifact.candidate_artifact_header(len(records), sampler)
                 )
             )
             completed = 0
@@ -202,18 +242,23 @@ def publish_candidate_checkpoint(
                         continue
                     row = _parse_line(raw, "candidate checkpoint", line_number)
                     if not saw_header:
-                        if row != _checkpoint_header(prompts, sampler):
+                        if row != _checkpoint_header(records, sampler):
                             raise ValueError("candidate checkpoint does not match this run")
                         saw_header = True
                         continue
-                    if completed >= len(prompts):
+                    if completed >= len(records):
                         raise ValueError("candidate checkpoint has too many groups")
+                    expected_prompt, expected_source_line = records[completed]
                     artifact.validate_candidate_group(
-                        row, completed, sampler, expected_prompt=prompts[completed]
+                        row,
+                        completed,
+                        sampler,
+                        expected_prompt=expected_prompt,
+                        expected_source_line=expected_source_line,
                     )
                     target.write(artifact.stable_json_line(row))
                     completed += 1
-            if not saw_header or completed != len(prompts):
+            if not saw_header or completed != len(records):
                 raise ValueError("candidate checkpoint is incomplete")
             target.flush()
             os.fsync(target.fileno())
@@ -442,13 +487,92 @@ def stage_offline_datasets(
 
 
 def publish_staged_datasets(
-    staged: StagedDatasets, sft_path: str, dpo_path: str
+    staged: StagedDatasets,
+    sft_path: str,
+    dpo_path: str,
+    *,
+    stale_dpo_path: str = "",
 ) -> None:
-    """Replace the requested outputs with already validated staging files."""
-    enforce_under_cwd_and_no_symlink(sft_path, "--output path")
-    os.replace(staged.sft_temp, sft_path)
-    staged.sft_temp = ""
+    """Publish staged outputs as one rollback-protected generation.
+
+    Existing SFT/DPO files are moved aside before either replacement. A failed
+    second replacement restores every previous file and removes a newly
+    published first file. ``stale_dpo_path`` participates in the same
+    transaction for a later SFT-only generation.
+    """
+    publications = [("sft_temp", staged.sft_temp, sft_path, "--output path")]
     if dpo_path:
-        enforce_under_cwd_and_no_symlink(dpo_path, "--emit-pairs path")
-        os.replace(staged.dpo_temp, dpo_path)
-        staged.dpo_temp = ""
+        publications.append(
+            ("dpo_temp", staged.dpo_temp, dpo_path, "--emit-pairs path")
+        )
+    removals = (
+        [(stale_dpo_path, "previous DPO path")] if stale_dpo_path else []
+    )
+    identities: set[str] = set()
+    destinations: list[tuple[str, str]] = []
+    for _attribute, staging, destination, field in publications:
+        if not staging or not os.path.isfile(staging):
+            raise ValueError(f"{field} staging file is missing")
+        enforce_under_cwd_and_no_symlink(destination, field)
+        identity = os.path.normcase(os.path.realpath(destination))
+        if identity in identities:
+            raise ValueError("offline publication paths must be distinct")
+        identities.add(identity)
+        destinations.append((destination, field))
+    for destination, field in removals:
+        enforce_under_cwd_and_no_symlink(destination, field)
+        identity = os.path.normcase(os.path.realpath(destination))
+        if identity in identities:
+            raise ValueError("offline publication paths must be distinct")
+        identities.add(identity)
+        destinations.append((destination, field))
+
+    backups: dict[str, str] = {}
+    committed: set[str] = set()
+    try:
+        for destination, field in destinations:
+            if not os.path.lexists(destination):
+                continue
+            if not stat.S_ISREG(os.lstat(destination).st_mode):
+                raise ValueError(f"{field} must be a regular file")
+            parent = os.path.dirname(os.path.abspath(destination)) or "."
+            fd, backup = tempfile.mkstemp(
+                prefix=".soup-bon-backup.", suffix=".tmp", dir=parent
+            )
+            os.close(fd)
+            try:
+                os.replace(destination, backup)
+            except Exception:
+                os.unlink(backup)
+                raise
+            backups[destination] = backup
+
+        for attribute, staging, destination, _field in publications:
+            os.replace(staging, destination)
+            setattr(staged, attribute, "")
+            committed.add(destination)
+    except Exception as exc:
+        rollback_failed = False
+        for destination in committed:
+            if destination in backups:
+                continue
+            try:
+                os.unlink(destination)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                rollback_failed = True
+        for destination, backup in backups.items():
+            try:
+                os.replace(backup, destination)
+            except OSError:
+                rollback_failed = True
+        if rollback_failed:
+            raise OSError("failed to restore a previous offline generation") from exc
+        raise
+    finally:
+        for backup in backups.values():
+            try:
+                os.unlink(backup)
+            except FileNotFoundError:
+                pass

@@ -3185,6 +3185,11 @@ def best_of_n(
                     )
                 publication_started = True
                 try:
+                    stale_dpo = ""
+                    if not emit_pairs and os.path.lexists(manifest_path):
+                        stale_dpo = bon_artifact.find_committed_sibling_dpo(
+                            manifest_path, sft_path=output
+                        )
                     manifest_bytes = bon_artifact.offline_manifest_from_digests(
                         candidate_artifact_sha256=offline_index.candidate_sha256,
                         judgments_sha256=offline_index.judgments_sha256,
@@ -3196,7 +3201,15 @@ def best_of_n(
                         dpo_count=staged.dpo_count,
                     ).encode("utf-8")
                     bon_artifact.invalidate_offline_manifest(manifest_path)
-                    bon_stream.publish_staged_datasets(staged, output, emit_pairs)
+                    if stale_dpo:
+                        bon_stream.publish_staged_datasets(
+                            staged,
+                            output,
+                            emit_pairs,
+                            stale_dpo_path=stale_dpo,
+                        )
+                    else:
+                        bon_stream.publish_staged_datasets(staged, output, emit_pairs)
                     atomic_write_bytes(manifest_bytes, manifest_path, field="manifest")
                 finally:
                     staged.cleanup()
@@ -3206,7 +3219,7 @@ def best_of_n(
             if not publication_started:
                 console.print(f"[red]Invalid offline artifact: {_escape(str(exc))}[/]")
                 raise typer.Exit(2) from exc
-            console.print(f"[red]Offline materialization failed: {_escape(str(exc))}[/]")
+            console.print(f"[red]Failed to write output: {_escape(str(exc))}[/]")
             raise typer.Exit(1) from exc
         body = (
             f"SFT rows:   [bold]{sft_count}[/]\n"
@@ -3357,11 +3370,20 @@ def best_of_n(
         is_local_path = os.path.exists(base) or os.path.isabs(base) or ntpath.isabs(base)
         public_model = "<local-model>" if is_local_path else base
         model_identity = os.path.realpath(base) if is_local_path else base
+        model_fingerprint_parts = [
+            "local-model",
+            model_identity,
+            revision or "unspecified",
+        ]
+        if is_local_path and export_mode:
+            model_fingerprint_parts.append(
+                bon_artifact.local_model_content_fingerprint(base)
+            )
         sampler_spec = {
             "kind": "local",
             "model": public_model,
             "model_fingerprint": bon_artifact.sampler_identity_fingerprint(
-                "local-model", model_identity, revision or "unspecified"
+                *model_fingerprint_parts
             ),
             "revision": revision or "unspecified",
             "n": n,
@@ -3418,7 +3440,7 @@ def best_of_n(
         completed = 0
         try:
             completed = bon_stream.prepare_candidate_checkpoint(
-                checkpoint_path, prompt_list, sampler_spec, resume=resume
+                checkpoint_path, prompt_records, sampler_spec, resume=resume
             )
             local_model = None
             tokenizer = None
@@ -3457,7 +3479,7 @@ def best_of_n(
                 bon_stream.append_candidate_group(checkpoint_path, group)
                 completed = index + 1
             bon_stream.publish_candidate_checkpoint(
-                checkpoint_path, export_candidates, prompt_list, sampler_spec
+                checkpoint_path, export_candidates, prompt_records, sampler_spec
             )
         except Exception as exc:
             console.print(

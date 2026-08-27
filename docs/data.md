@@ -266,6 +266,13 @@ Candidate export durably checkpoints each completed prompt group at
 before continuing at the first incomplete group. Candidate and judgment inputs
 are validated through a temporary disk index, and final SFT/DPO files are staged
 incrementally, so memory does not grow with the complete artifact size.
+For a local model directory, the checkpoint binds the exact regular-file names,
+sizes, and contents through a privacy-safe fingerprint; replacing weights at the
+same path therefore invalidates resume before the model is loaded. Prompt source
+lines and provider endpoints are bound as well without exposing private paths or
+URLs. Streamed SFT/DPO replacements are committed as one rollback-protected set,
+and an SFT-only replacement retires a prior manifest-bound DPO in that same
+transaction.
 
 ### Custom Transforms
 

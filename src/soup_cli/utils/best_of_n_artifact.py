@@ -37,10 +37,68 @@ def sampler_identity_fingerprint(*parts: str) -> str:
     return _sha({"identity": list(parts)})
 
 
-def prompt_seed(seed: int, index: int) -> int:
-    """Derive a stable torch seed for one prompt, independent of resume position."""
-    encoded = f"{seed}:{index}".encode("ascii")
-    return int.from_bytes(hashlib.sha256(encoded).digest()[:8], "big") & ((1 << 63) - 1)
+def local_model_content_fingerprint(path: str) -> str:
+    """Hash the exact regular-file content of a local model source.
+
+    Logical relative names and bytes are included so replacing a file in the
+    same directory cannot reuse an authenticated candidate checkpoint. Paths
+    themselves are never returned or written to the public artifact.
+    """
+    if not isinstance(path, str) or not path:
+        raise ValueError("local model path must be a non-empty string")
+    root = os.path.realpath(path)
+    files: list[tuple[str, str]] = []
+    if os.path.isfile(root):
+        files.append((os.path.basename(root), root))
+    elif os.path.isdir(root):
+        for directory, dirnames, filenames in os.walk(root, followlinks=False):
+            dirnames.sort()
+            filenames.sort()
+            for dirname in dirnames:
+                if os.path.islink(os.path.join(directory, dirname)):
+                    raise ValueError("local model path contains a symlinked directory")
+            for filename in filenames:
+                logical = os.path.relpath(os.path.join(directory, filename), root)
+                files.append((logical.replace(os.sep, "/"), os.path.join(directory, filename)))
+    else:
+        raise ValueError("local model path must be a regular file or directory")
+
+    digest = hashlib.sha256(b"soup.local-model-content.v1\0")
+    for logical, source in files:
+        resolved = os.path.realpath(source)
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+        fd = os.open(resolved, flags)
+        try:
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode):
+                raise ValueError("local model content must contain only regular files")
+            name = logical.encode("utf-8")
+            digest.update(len(name).to_bytes(8, "big"))
+            digest.update(name)
+            digest.update(before.st_size.to_bytes(16, "big"))
+            while True:
+                chunk = os.read(fd, 1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+            after = os.fstat(fd)
+            identity_before = (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+            )
+            identity_after = (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+            )
+            if identity_before != identity_after:
+                raise ValueError("local model content changed while it was fingerprinted")
+        finally:
+            os.close(fd)
+    return digest.hexdigest()
 
 
 def _validate_sampler(sampler: Any) -> dict:
@@ -233,6 +291,7 @@ def validate_candidate_group(
     sampler: dict,
     *,
     expected_prompt: str | None = None,
+    expected_source_line: int | None = None,
 ) -> str:
     """Authenticate one candidate group and return its prompt id."""
     if not isinstance(group, dict):
@@ -246,6 +305,8 @@ def validate_candidate_group(
         or source_line < 1
     ):
         raise ValueError(f"candidate group {index} has an invalid source line")
+    if expected_source_line is not None and source_line != expected_source_line:
+        raise ValueError(f"candidate group {index} does not match its source line")
     prompt = group["prompt"]
     if expected_prompt is not None and prompt != expected_prompt:
         raise ValueError(f"candidate group {index} does not match its source prompt")
