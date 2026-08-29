@@ -554,6 +554,48 @@ def test_streamed_publication_restores_changed_generation_on_dpo_failure(
     staged.cleanup()
 
 
+def test_streamed_publication_commits_manifest_last(tmp_path, monkeypatch):
+    import os
+
+    from soup_cli.utils.best_of_n_stream import StagedDatasets, publish_staged_datasets
+
+    monkeypatch.chdir(tmp_path)
+    sft = tmp_path / "sft.jsonl"
+    dpo = tmp_path / "dpo.jsonl"
+    manifest = tmp_path / "manifest.json"
+    sft_temp = tmp_path / ".soup.group.sft.tmp"
+    dpo_temp = tmp_path / ".soup.group.dpo.tmp"
+    sft_temp.write_bytes(b"sft\n")
+    dpo_temp.write_bytes(b"dpo\n")
+    staged = StagedDatasets(
+        sft_temp=str(sft_temp),
+        dpo_temp=str(dpo_temp),
+        sft_sha256="1" * 64,
+        dpo_sha256="2" * 64,
+        sft_count=1,
+        dpo_count=1,
+    )
+    destinations = {str(sft), str(dpo), str(manifest)}
+    publication_order = []
+    real_replace = os.replace
+
+    def record_publication(source, destination):
+        if destination in destinations:
+            publication_order.append(destination)
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", record_publication)
+    publish_staged_datasets(
+        staged,
+        str(sft),
+        str(dpo),
+        manifest_path=str(manifest),
+        manifest_bytes=b'{"generation":"new"}\n',
+    )
+
+    assert publication_order == [str(sft), str(dpo), str(manifest)]
+
+
 def test_atomic_group_removal_validation_is_directly_covered(tmp_path, monkeypatch):
     from soup_cli.utils.paths import atomic_write_bytes_group
 
