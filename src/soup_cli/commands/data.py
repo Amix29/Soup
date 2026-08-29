@@ -3079,10 +3079,7 @@ def best_of_n(
     from soup_cli.utils import best_of_n_artifact as bon_artifact
     from soup_cli.utils import best_of_n_checkpoint as bon_checkpoint
     from soup_cli.utils.magpie import make_magpie_generate_fn
-    from soup_cli.utils.paths import (
-        atomic_write_bytes,
-        enforce_under_cwd_and_no_symlink,
-    )
+    from soup_cli.utils.paths import enforce_under_cwd_and_no_symlink
     from soup_cli.utils.trust_remote import (
         model_requires_trust_remote_code,
         resolve_trust_remote_code,
@@ -3200,17 +3197,14 @@ def best_of_n(
                         dpo_sha256=staged.dpo_sha256,
                         dpo_count=staged.dpo_count,
                     ).encode("utf-8")
-                    bon_artifact.invalidate_offline_manifest(manifest_path)
-                    if stale_dpo:
-                        bon_stream.publish_staged_datasets(
-                            staged,
-                            output,
-                            emit_pairs,
-                            stale_dpo_path=stale_dpo,
-                        )
-                    else:
-                        bon_stream.publish_staged_datasets(staged, output, emit_pairs)
-                    atomic_write_bytes(manifest_bytes, manifest_path, field="manifest")
+                    bon_stream.publish_staged_datasets(
+                        staged,
+                        output,
+                        emit_pairs,
+                        manifest_path=manifest_path,
+                        manifest_bytes=manifest_bytes,
+                        stale_dpo_path=stale_dpo,
+                    )
                 finally:
                     staged.cleanup()
                 sft_count = staged.sft_count
@@ -3285,10 +3279,14 @@ def best_of_n(
             )
             checkpoint_path = checkpoint or f"{export_candidates}.checkpoint.jsonl"
             enforce_under_cwd_and_no_symlink(checkpoint_path, "--checkpoint path")
-            if os.path.normcase(os.path.realpath(checkpoint_path)) == os.path.normcase(
-                os.path.realpath(export_candidates)
-            ):
-                raise ValueError("candidate artifact and checkpoint paths must be distinct")
+            export_paths = [prompts, export_candidates, checkpoint_path]
+            if len(
+                {os.path.normcase(os.path.realpath(path)) for path in export_paths}
+            ) != len(export_paths):
+                raise ValueError(
+                    "prompt source, candidate artifact, and checkpoint paths "
+                    "must be distinct"
+                )
     except (FileNotFoundError, TypeError, ValueError) as exc:
         console.print(f"[red]{_escape(str(exc))}[/]")
         raise typer.Exit(2) from exc

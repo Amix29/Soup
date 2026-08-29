@@ -363,11 +363,7 @@ def test_failed_sft_only_replacement_restores_manifest_bound_dpo(
 
     def fail_sft(source, destination):
         nonlocal failed_once
-        if (
-            not failed_once
-            and destination == str(sft)
-            and ".soup.group." in str(source)
-        ):
+        if not failed_once and destination == str(sft):
             failed_once = True
             raise OSError("simulated SFT publication failure")
         return real_replace(source, destination)

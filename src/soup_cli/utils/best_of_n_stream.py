@@ -491,16 +491,22 @@ def publish_staged_datasets(
     sft_path: str,
     dpo_path: str,
     *,
+    manifest_path: str,
+    manifest_bytes: bytes,
     stale_dpo_path: str = "",
 ) -> None:
     """Publish staged outputs as one rollback-protected generation.
 
-    Existing SFT/DPO files are moved aside before either replacement. A failed
-    second replacement restores every previous file and removes a newly
-    published first file. ``stale_dpo_path`` participates in the same
-    transaction for a later SFT-only generation.
+    Existing SFT/DPO/manifest files are moved aside before any replacement. A
+    failed replacement restores every previous file and removes newly
+    published files. ``stale_dpo_path`` participates in the same transaction
+    for a later SFT-only generation. The manifest is always published last.
     """
-    publications = [("sft_temp", staged.sft_temp, sft_path, "--output path")]
+    if not isinstance(manifest_bytes, (bytes, bytearray)):
+        raise TypeError("manifest data must be bytes")
+    publications: list[tuple[str, str, str, str]] = [
+        ("sft_temp", staged.sft_temp, sft_path, "--output path")
+    ]
     if dpo_path:
         publications.append(
             ("dpo_temp", staged.dpo_temp, dpo_path, "--emit-pairs path")
@@ -527,6 +533,34 @@ def publish_staged_datasets(
         identities.add(identity)
         destinations.append((destination, field))
 
+    enforce_under_cwd_and_no_symlink(manifest_path, "--manifest path")
+    manifest_identity = os.path.normcase(os.path.realpath(manifest_path))
+    if manifest_identity in identities:
+        raise ValueError("offline publication paths must be distinct")
+    identities.add(manifest_identity)
+    destinations.append((manifest_path, "--manifest path"))
+
+    manifest_parent = os.path.dirname(os.path.abspath(manifest_path)) or "."
+    os.makedirs(manifest_parent, exist_ok=True)
+    manifest_fd, manifest_temp = tempfile.mkstemp(
+        prefix=".soup-bon-manifest.", suffix=".tmp", dir=manifest_parent
+    )
+    try:
+        with os.fdopen(manifest_fd, "wb") as manifest_handle:
+            manifest_fd = -1
+            manifest_handle.write(bytes(manifest_bytes))
+            manifest_handle.flush()
+            os.fsync(manifest_handle.fileno())
+    except Exception:
+        if manifest_fd >= 0:
+            os.close(manifest_fd)
+        try:
+            os.unlink(manifest_temp)
+        except FileNotFoundError:
+            pass
+        raise
+    publications.append(("", manifest_temp, manifest_path, "--manifest path"))
+
     backups: dict[str, str] = {}
     committed: set[str] = set()
     try:
@@ -549,7 +583,10 @@ def publish_staged_datasets(
 
         for attribute, staging, destination, _field in publications:
             os.replace(staging, destination)
-            setattr(staged, attribute, "")
+            if attribute:
+                setattr(staged, attribute, "")
+            else:
+                manifest_temp = ""
             committed.add(destination)
     except Exception as exc:
         rollback_failed = False
@@ -570,9 +607,15 @@ def publish_staged_datasets(
         if rollback_failed:
             raise OSError("failed to restore a previous offline generation") from exc
         raise
-    finally:
+    else:
         for backup in backups.values():
             try:
                 os.unlink(backup)
+            except FileNotFoundError:
+                pass
+    finally:
+        if manifest_temp:
+            try:
+                os.unlink(manifest_temp)
             except FileNotFoundError:
                 pass

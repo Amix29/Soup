@@ -43,6 +43,30 @@ def _local_args(tmp_path, model_path, *extra):
     ]
 
 
+def test_candidate_export_rejects_prompt_destination_collision(tmp_path, monkeypatch):
+    from soup_cli.commands.data import app
+
+    monkeypatch.chdir(tmp_path)
+    prompts = tmp_path / "prompts.jsonl"
+    original = b'{"prompt":"must survive"}\n'
+    prompts.write_bytes(original)
+    calls = []
+    monkeypatch.setattr(
+        "soup_cli.utils.magpie.make_magpie_generate_fn",
+        lambda *_args, **_kwargs: lambda prompt: calls.append(prompt) or "candidate",
+    )
+
+    args = _args(tmp_path)
+    args[args.index(str(tmp_path / "candidates.jsonl"))] = str(prompts)
+    result = CliRunner().invoke(app, args)
+
+    assert result.exit_code == 2
+    assert "must be distinct" in result.output
+    assert prompts.read_bytes() == original
+    assert calls == []
+    assert not (tmp_path / "prompts.jsonl.checkpoint.jsonl").exists()
+
+
 def test_late_candidate_failure_resumes_without_replaying_completed_groups(
     tmp_path, monkeypatch
 ):
