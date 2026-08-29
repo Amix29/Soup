@@ -10,7 +10,7 @@ import stat
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Iterator
+from typing import Iterator, cast
 
 from soup_cli.utils import best_of_n_artifact as artifact
 from soup_cli.utils.paths import enforce_under_cwd_and_no_symlink
@@ -42,7 +42,7 @@ def _normalise_prompt_records(prompts: list[str] | list[PromptRecord]) -> list[P
             and not isinstance(value[1], bool)
             and value[1] > 0
         ):
-            record = value
+            record = cast(PromptRecord, value)
         else:
             raise ValueError("candidate checkpoint prompts are invalid")
         records.append(record)
