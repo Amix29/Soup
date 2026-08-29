@@ -3357,13 +3357,13 @@ def best_of_n(
             "kind": "provider",
             "provider": sampling_provider,
             "model": model,
-            "endpoint_fingerprint": bon_artifact.sampler_identity_fingerprint(
-                "provider-endpoint", base_url or default_endpoint
-            ),
             "n": n,
             "temperature": temperature,
             "max_new_tokens": max_new_tokens,
         }
+        sampler_identity = bon_artifact.sampler_identity_fingerprint(
+            "provider-endpoint", base_url or default_endpoint
+        )
     else:
         is_local_path = os.path.exists(base) or os.path.isabs(base) or ntpath.isabs(base)
         public_model = "<local-model>" if is_local_path else base
@@ -3380,9 +3380,6 @@ def best_of_n(
         sampler_spec = {
             "kind": "local",
             "model": public_model,
-            "model_fingerprint": bon_artifact.sampler_identity_fingerprint(
-                *model_fingerprint_parts
-            ),
             "revision": revision or "unspecified",
             "n": n,
             "temperature": temperature,
@@ -3391,6 +3388,9 @@ def best_of_n(
             "seed": seed,
             "trust_remote_code": trust,
         }
+        sampler_identity = bon_artifact.sampler_identity_fingerprint(
+            *model_fingerprint_parts
+        )
 
     digest = ""
     if not export_mode:
@@ -3438,7 +3438,11 @@ def best_of_n(
         completed = 0
         try:
             completed = bon_stream.prepare_candidate_checkpoint(
-                checkpoint_path, prompt_records, sampler_spec, resume=resume
+                checkpoint_path,
+                prompt_records,
+                sampler_spec,
+                sampler_identity,
+                resume=resume,
             )
             local_model = None
             tokenizer = None
@@ -3477,7 +3481,11 @@ def best_of_n(
                 bon_stream.append_candidate_group(checkpoint_path, group)
                 completed = index + 1
             bon_stream.publish_candidate_checkpoint(
-                checkpoint_path, export_candidates, prompt_records, sampler_spec
+                checkpoint_path,
+                export_candidates,
+                prompt_records,
+                sampler_spec,
+                sampler_identity,
             )
         except Exception as exc:
             console.print(

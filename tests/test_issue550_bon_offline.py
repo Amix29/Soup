@@ -81,8 +81,6 @@ def _write_judgments(path, groups):
 def test_candidate_export_needs_no_judge_and_preserves_order_and_digests(
     tmp_path, monkeypatch
 ):
-    from soup_cli.utils.best_of_n_artifact import sampler_identity_fingerprint
-
     artifact, calls = _export_candidates(tmp_path, monkeypatch)
     assert calls == ["question one", "question one", "question two", "question two"]
     records = [json.loads(line) for line in artifact.read_text().splitlines()]
@@ -92,9 +90,6 @@ def test_candidate_export_needs_no_judge_and_preserves_order_and_digests(
         "kind": "provider",
         "provider": "ollama",
         "model": "sampler-model",
-        "endpoint_fingerprint": sampler_identity_fingerprint(
-            "provider-endpoint", "http://localhost:11434/private-route"
-        ),
         "n": 2,
         "temperature": 1.0,
         "max_new_tokens": 256,
@@ -307,16 +302,17 @@ def test_failed_dpo_replacement_restores_previous_generation(tmp_path, monkeypat
     assert manifest_path.exists()
     previous = (sft.read_bytes(), dpo.read_bytes(), manifest_path.read_bytes())
 
-    def fail_dpo(staged, sft_path, _dpo_path):
-        import os
+    real_replace = __import__("os").replace
+    failed_once = False
 
-        os.replace(staged.sft_temp, sft_path)
-        staged.sft_temp = ""
-        raise OSError("simulated DPO publication failure")
+    def fail_dpo(source, destination):
+        nonlocal failed_once
+        if not failed_once and destination == str(dpo):
+            failed_once = True
+            raise OSError("simulated DPO publication failure")
+        return real_replace(source, destination)
 
-    monkeypatch.setattr(
-        "soup_cli.utils.best_of_n_stream.publish_staged_datasets", fail_dpo
-    )
+    monkeypatch.setattr("os.replace", fail_dpo)
     failed = CliRunner().invoke(app, args)
     assert failed.exit_code == 1
     assert (sft.read_bytes(), dpo.read_bytes(), manifest_path.read_bytes()) == previous
@@ -363,7 +359,11 @@ def test_failed_sft_only_replacement_restores_manifest_bound_dpo(
 
     def fail_sft(source, destination):
         nonlocal failed_once
-        if not failed_once and destination == str(sft):
+        if (
+            not failed_once
+            and destination == str(sft)
+            and ".soup.group." in str(source)
+        ):
             failed_once = True
             raise OSError("simulated SFT publication failure")
         return real_replace(source, destination)

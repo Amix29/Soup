@@ -179,7 +179,6 @@ def test_offline_large_artifacts_bypass_whole_file_materializers(tmp_path, monke
         "kind": "provider",
         "provider": "ollama",
         "model": "sampler-model",
-        "endpoint_fingerprint": _FINGERPRINT,
         "n": 2,
         "temperature": 1.0,
         "max_new_tokens": 256,
@@ -272,7 +271,6 @@ def test_streaming_candidate_structure_failures_never_commit_manifest(
         "kind": "provider",
         "provider": "ollama",
         "model": "sampler-model",
-        "endpoint_fingerprint": _FINGERPRINT,
         "n": 2,
         "temperature": 1.0,
         "max_new_tokens": 256,
@@ -322,7 +320,6 @@ def test_resume_discards_an_uncommitted_candidate_tail(tmp_path, monkeypatch):
         "kind": "provider",
         "provider": "ollama",
         "model": "sampler-model",
-        "endpoint_fingerprint": _FINGERPRINT,
         "n": 2,
         "temperature": 1.0,
         "max_new_tokens": 256,
@@ -330,7 +327,7 @@ def test_resume_discards_an_uncommitted_candidate_tail(tmp_path, monkeypatch):
     prompts = ["q1", "q2"]
     checkpoint = tmp_path / "checkpoint.jsonl"
     assert prepare_candidate_checkpoint(
-        str(checkpoint), prompts, sampler, resume=False
+        str(checkpoint), prompts, sampler, _FINGERPRINT, resume=False
     ) == 0
     append_candidate_group(
         str(checkpoint),
@@ -340,11 +337,37 @@ def test_resume_discards_an_uncommitted_candidate_tail(tmp_path, monkeypatch):
         handle.write(b'{"prompt_index":1,"prompt":')
 
     completed = prepare_candidate_checkpoint(
-        str(checkpoint), prompts, sampler, resume=True
+        str(checkpoint), prompts, sampler, _FINGERPRINT, resume=True
     )
 
     assert completed == 1
     assert checkpoint.read_bytes().endswith(b"\n")
+
+
+def test_checkpoint_identity_is_private_and_not_published(tmp_path, monkeypatch):
+    from soup_cli.commands.data import app
+    from soup_cli.utils.best_of_n_artifact import sampler_identity_fingerprint
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "prompts.jsonl").write_text('{"prompt":"q"}\n', encoding="utf-8")
+    monkeypatch.setattr(
+        "soup_cli.utils.magpie.make_magpie_generate_fn",
+        lambda *_args, **_kwargs: lambda _prompt: "candidate",
+    )
+
+    result = CliRunner().invoke(app, _args(tmp_path))
+
+    assert result.exit_code == 0, (result.output, repr(result.exception))
+    identity = sampler_identity_fingerprint(
+        "provider-endpoint", "http://localhost:11434"
+    )
+    checkpoint = (tmp_path / "candidates.jsonl.checkpoint.jsonl").read_text(
+        encoding="utf-8"
+    )
+    artifact = (tmp_path / "candidates.jsonl").read_text(encoding="utf-8")
+    assert identity in checkpoint
+    assert identity not in artifact
+    assert "endpoint_fingerprint" not in artifact
 
 
 def test_resume_rejects_provider_endpoint_drift(tmp_path, monkeypatch):
@@ -480,3 +503,78 @@ def test_local_resume_reuses_the_same_prompt_seed(tmp_path, monkeypatch):
 
     assert resumed.exit_code == 0, (resumed.output, repr(resumed.exception))
     assert sampled[-1] == ("second", interrupted)
+
+
+def test_streamed_publication_restores_changed_generation_on_dpo_failure(
+    tmp_path, monkeypatch
+):
+    import os
+
+    from soup_cli.utils.best_of_n_stream import StagedDatasets, publish_staged_datasets
+
+    monkeypatch.chdir(tmp_path)
+    sft = tmp_path / "sft.jsonl"
+    dpo = tmp_path / "dpo.jsonl"
+    manifest = tmp_path / "manifest.json"
+    old = (b"old-sft\n", b"old-dpo\n", b'{"generation":"old"}\n')
+    for path, content in zip((sft, dpo, manifest), old):
+        path.write_bytes(content)
+
+    sft_temp = tmp_path / ".soup.group.new-sft.tmp"
+    dpo_temp = tmp_path / ".soup.group.new-dpo.tmp"
+    sft_temp.write_bytes(b"new-sft\n")
+    dpo_temp.write_bytes(b"new-dpo\n")
+    staged = StagedDatasets(
+        sft_temp=str(sft_temp),
+        dpo_temp=str(dpo_temp),
+        sft_sha256="1" * 64,
+        dpo_sha256="2" * 64,
+        sft_count=1,
+        dpo_count=1,
+    )
+    real_replace = os.replace
+
+    def fail_new_dpo(source, destination):
+        if source == str(dpo_temp) and destination == str(dpo):
+            raise OSError("simulated DPO publication failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", fail_new_dpo)
+    with pytest.raises(OSError, match="simulated DPO publication failure"):
+        publish_staged_datasets(
+            staged,
+            str(sft),
+            str(dpo),
+            manifest_path=str(manifest),
+            manifest_bytes=b'{"generation":"new"}\n',
+        )
+
+    assert (sft.read_bytes(), dpo.read_bytes(), manifest.read_bytes()) == old
+    assert not list(tmp_path.glob(".soup-bon-backup.*"))
+    staged.cleanup()
+
+
+def test_atomic_group_removal_validation_is_directly_covered(tmp_path, monkeypatch):
+    from soup_cli.utils.paths import atomic_write_bytes_group
+
+    monkeypatch.chdir(tmp_path)
+    output = str(tmp_path / "output.jsonl")
+
+    with pytest.raises(TypeError, match="removals must be a list"):
+        atomic_write_bytes_group([(b"new", output, "output")], removals=())
+    with pytest.raises(TypeError, match="each removal"):
+        atomic_write_bytes_group(
+            [(b"new", output, "output")], removals=[(output,)]
+        )
+    with pytest.raises(ValueError, match="must be distinct"):
+        atomic_write_bytes_group(
+            [(b"new", output, "output")], removals=[(output, "stale output")]
+        )
+
+    removal_directory = tmp_path / "stale-directory"
+    removal_directory.mkdir()
+    with pytest.raises(ValueError, match="must be a regular file"):
+        atomic_write_bytes_group(
+            [(b"new", output, "output")],
+            removals=[(str(removal_directory), "stale output")],
+        )

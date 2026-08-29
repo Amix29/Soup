@@ -107,10 +107,9 @@ def _validate_sampler(sampler: Any) -> dict:
     kind = sampler.get("kind")
     common = {"kind", "model", "n", "temperature", "max_new_tokens"}
     expected = (
-        common | {"provider", "endpoint_fingerprint"}
+        common | {"provider"}
         if kind == "provider"
-        else common
-        | {"revision", "device", "seed", "trust_remote_code", "model_fingerprint"}
+        else common | {"revision", "device", "seed", "trust_remote_code"}
     )
     if kind not in {"provider", "local"} or set(sampler) != expected:
         raise ValueError("candidate sampler specification has unsupported fields")
@@ -147,10 +146,6 @@ def _validate_sampler(sampler: Any) -> dict:
     if kind == "provider":
         if sampler.get("provider") not in {"ollama", "vllm"}:
             raise ValueError("candidate sampler provider is invalid")
-        if not isinstance(sampler.get("endpoint_fingerprint"), str) or not (
-            _SHA256_VALUE.fullmatch(sampler["endpoint_fingerprint"])
-        ):
-            raise ValueError("candidate sampler endpoint fingerprint is invalid")
     else:
         revision = sampler.get("revision")
         if (
@@ -173,10 +168,6 @@ def _validate_sampler(sampler: Any) -> dict:
             raise ValueError("candidate sampler seed is invalid")
         if not isinstance(sampler.get("trust_remote_code"), bool):
             raise ValueError("candidate sampler trust flag is invalid")
-        if not isinstance(sampler.get("model_fingerprint"), str) or not (
-            _SHA256_VALUE.fullmatch(sampler["model_fingerprint"])
-        ):
-            raise ValueError("candidate sampler model fingerprint is invalid")
     return sampler
 
 

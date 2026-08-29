@@ -49,7 +49,21 @@ def _normalise_prompt_records(prompts: list[str] | list[PromptRecord]) -> list[P
     return records
 
 
-def _run_digest(prompts: list[str] | list[PromptRecord], sampler: dict) -> str:
+def _validate_identity_fingerprint(value: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError("candidate checkpoint identity fingerprint is invalid")
+    return value
+
+
+def _run_digest(
+    prompts: list[str] | list[PromptRecord],
+    sampler: dict,
+    identity_fingerprint: str,
+) -> str:
     records = _normalise_prompt_records(prompts)
     payload = {
         "prompts": [
@@ -57,6 +71,7 @@ def _run_digest(prompts: list[str] | list[PromptRecord], sampler: dict) -> str:
             for prompt, source_line in records
         ],
         "sampler": sampler,
+        "identity_fingerprint": _validate_identity_fingerprint(identity_fingerprint),
     }
     data = json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -93,14 +108,21 @@ def _regular_binary_lines(path: str, field: str) -> Iterator[Iterator[tuple[int,
             os.close(fd)
 
 
-def _checkpoint_header(prompts: list[str] | list[PromptRecord], sampler: dict) -> dict:
+def _checkpoint_header(
+    prompts: list[str] | list[PromptRecord],
+    sampler: dict,
+    identity_fingerprint: str,
+) -> dict:
     records = _normalise_prompt_records(prompts)
     return {
         "_best_of_n_checkpoint": {
             "schema": _CHECKPOINT_SCHEMA,
-            "run_digest": _run_digest(records, sampler),
+            "run_digest": _run_digest(records, sampler, identity_fingerprint),
             "prompt_count": len(records),
             "sampler": sampler,
+            "identity_fingerprint": _validate_identity_fingerprint(
+                identity_fingerprint
+            ),
         }
     }
 
@@ -141,6 +163,7 @@ def prepare_candidate_checkpoint(
     path: str,
     prompts: list[str] | list[PromptRecord],
     sampler: dict,
+    identity_fingerprint: str,
     *,
     resume: bool,
 ) -> int:
@@ -148,7 +171,7 @@ def prepare_candidate_checkpoint(
     sampler = artifact.validate_sampler_spec(sampler)
     enforce_under_cwd_and_no_symlink(path, "--checkpoint path")
     records = _normalise_prompt_records(prompts)
-    expected_header = _checkpoint_header(records, sampler)
+    expected_header = _checkpoint_header(records, sampler, identity_fingerprint)
     exists = os.path.lexists(path)
     if not exists:
         if resume:
@@ -219,6 +242,7 @@ def publish_candidate_checkpoint(
     output: str,
     prompts: list[str] | list[PromptRecord],
     sampler: dict,
+    identity_fingerprint: str,
 ) -> None:
     """Stream a complete checkpoint into one atomically published artifact."""
     enforce_under_cwd_and_no_symlink(output, "--export-candidates path")
@@ -242,7 +266,9 @@ def publish_candidate_checkpoint(
                         continue
                     row = _parse_line(raw, "candidate checkpoint", line_number)
                     if not saw_header:
-                        if row != _checkpoint_header(records, sampler):
+                        if row != _checkpoint_header(
+                            records, sampler, identity_fingerprint
+                        ):
                             raise ValueError("candidate checkpoint does not match this run")
                         saw_header = True
                         continue
@@ -425,7 +451,7 @@ def _staging_file(output: str, field: str) -> tuple[int, str]:
     enforce_under_cwd_and_no_symlink(output, field)
     parent = os.path.dirname(os.path.abspath(output)) or "."
     os.makedirs(parent, exist_ok=True)
-    return tempfile.mkstemp(prefix=".soup-bon-output.", dir=parent)
+    return tempfile.mkstemp(prefix=".soup.group.", suffix=".tmp", dir=parent)
 
 
 def stage_offline_datasets(
