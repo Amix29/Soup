@@ -1862,6 +1862,8 @@ class StreamRuntime:
     #: True source parameter count, from the shard index. PEFT's own total
     #: is ~6.5x too high for a streamed NF4 model (see trainer/sft.py).
     total_params: int = 0
+    #: Read-only Qwen4 PLE mappings, if the N-gram table is SSD-backed.
+    external_sources: Tuple[Any, ...] = ()
 
     def close(self) -> None:
         """Release the weight source and detach the prefetch hook.
@@ -1873,6 +1875,10 @@ class StreamRuntime:
         source_close = getattr(self.source, "close", None)
         if callable(source_close):
             source_close()
+        for external in self.external_sources:
+            external_close = getattr(external, "close", None)
+            if callable(external_close):
+                external_close()
         if self.hook is not None:
             self.hook.remove()
             self.hook = None
@@ -2270,6 +2276,8 @@ def build_streamed_model(
     quant: str = "none",
     double_quant: bool = True,
     tier: str = "ram",
+    weights_dir: Optional[str] = None,
+    ngram_source: str = "disk",
 ) -> Tuple[Any, StreamRuntime]:
     """Meta skeleton -> extras -> LoRA -> streaming. No resident base load."""
     from peft import get_peft_model
@@ -2281,22 +2289,48 @@ def build_streamed_model(
         double_quant=double_quant,
         trust_remote_code=trust_remote_code,
     )
-    extras = materialize_extras(model, shard_dir, index, device=device, dtype=dtype)
-    for param in model.parameters():
-        param.requires_grad = False
-    model = get_peft_model(model, lora_config)
-    materialize_meta_adapters(model, seed=seed, device=device)
-    assert_trainable_adapters_materialized(model)
-    runtime = install_streaming(
-        model,
-        shard_dir=shard_dir,
-        index=index,
-        buffers=buffers,
-        pin=pin,
-        require_pin=require_pin,
-        device=device,
-        console=console,
-        codes=extras.codes,
-        tier=tier,
-    )
+    external_tensors = dict(getattr(index, "external_tensors", None) or {})
+    external_sources: Tuple[Any, ...] = ()
+    if external_tensors:
+        if weights_dir is None:
+            raise ValueError(
+                "a Qwen4 shard index with external PLE tensors requires weights_dir"
+            )
+        from soup_cli.utils.qwen4_ple import install_qwen4_ple_embeddings
+
+        external_sources = install_qwen4_ple_embeddings(
+            model,
+            weights_dir=weights_dir,
+            external_tensors=external_tensors,
+            source=ngram_source,
+        )
+    try:
+        extras = materialize_extras(
+            model, shard_dir, index, device=device, dtype=dtype
+        )
+        for param in model.parameters():
+            param.requires_grad = False
+        from soup_cli.utils.peft_wiring import apply_pre_lora_patches
+
+        apply_pre_lora_patches(model, model_id)
+        model = get_peft_model(model, lora_config)
+        materialize_meta_adapters(model, seed=seed, device=device)
+        assert_trainable_adapters_materialized(model)
+        runtime = install_streaming(
+            model,
+            shard_dir=shard_dir,
+            index=index,
+            buffers=buffers,
+            pin=pin,
+            require_pin=require_pin,
+            device=device,
+            console=console,
+            codes=extras.codes,
+            tier=tier,
+        )
+    except BaseException:
+        for external in external_sources:
+            external.close()
+        raise
+    runtime.external_sources = external_sources
     return model, runtime

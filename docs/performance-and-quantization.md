@@ -246,6 +246,7 @@ Stream frozen base-model decoder layers ONE at a time from CPU RAM into small VR
 training:
   stream_layers: true          # Enable layer streaming
   stream_source: auto          # 'auto' (same-host RAM), 'ram', 'disk' (v0.72.3)
+  stream_ngram_source: auto    # Qwen4 PLE only: 'auto', 'ram', or read-only 'disk'
   stream_buffers: 2            # Double-buffering; range [2, 8]
   # stream_pin: false          # Force the pinned RAM store off (escape hatch) or on; unset = automatic. See below
   # stream_vram_override: 4_000_000_000   # Bytes to assume free (v0.73.x); see below
@@ -259,6 +260,26 @@ soup train --config soup.yaml
 ```
 
 **How it works.** LoRA adapters + their gradients + optimizer state stay resident in VRAM (they are small). The frozen base lives in CPU RAM, page-locked when the machine allows it, and is streamed: each decoder layer is copied into one of two pre-allocated VRAM buffers on a dedicated CUDA stream while the previous layer is still computing, so the load overlaps the compute. Vocabulary-sized `embed_tokens` and an untied `lm_head` use one additional shared slot: the embedding is loaded for the model input, then the same allocation is reused for the output head after the last decoder layer. Each decoder layer is read **twice** per step — once in the forward pass and once when the backward pass recomputes it — because `dL/dx = Wᵀ · dL/dy` needs the weights to reach the layers below. That is physics, not an implementation detail, and it is why streaming costs time.
+
+**Qwen3.8-Flash-Next / Qwen4-Exp PLE.** The frozen PLE N-gram table is not a
+decoder-layer weight for storage purposes: putting it in the PLE layer's shard
+would make the shared layer buffer as large as the whole table. Soup keeps the
+Transformers checkpoint's row-contiguous `ngram_embedding.shard_*` tensors in
+place. `stream_ngram_source: disk` opens those original safetensors read-only
+and gathers only the rows requested by the current tokens; it never rewrites or
+copies the table into Soup's shard cache. `ram` loads the same parts into CPU
+RAM without concatenating a second full table, and `auto` selects RAM only when
+the measured table plus the selected base tier fits the host-memory headroom.
+The CPU parity gate covers exact rows, logits, loss, LoRA gradients, source-file
+non-mutation, and mapping cleanup. On the M4 Max, the same float32 streamed
+forward/backward passed with a measured maximum logit difference of 1.49e-8
+versus resident (the zero-LoRA PEFT wrapper changes an MPS reduction schedule),
+while the CPU row/logit/loss oracle remains bit-exact. Production-checkpoint
+throughput and peak memory remain unmeasured. This path requires an official dense Transformers
+safetensors checkpoint; oMLX/oQ inference checkpoints are not trainable inputs.
+The initial gate is deliberately narrow: `task: sft` and
+`quantization: none`. Preference-loss and streamed-NF4 parity are pending and
+those Qwen4 combinations fail before sharding.
 
 **Apple Silicon is experimental.** With `backend: transformers`, MPS uses a pageable CPU
 source and MPS layer buffers; host pinning is disabled. PyTorch 2.7+ may otherwise turn
@@ -321,7 +342,7 @@ The 3.32 GB 8B row above predates large-layer streaming: its untied, unquantised
   listed by `SPNVMeDataType`; an unmatched solid-state device remains `ssd`, and
   unknown hardware remains refused. `training.stream_disk_kind` still has final
   authority when explicitly set.
-- **Llama / Qwen / Qwen3.5 dense and MoE text / Mistral / Gemma / Gemma2 / Gemma3-Text / Phi / Phi3** (`qwen3_5`, `qwen3_5_text`, `qwen3_5_moe`, and `qwen3_5_moe_text` route through the qwen3 streamer), `task: sft`, `backend: transformers`, `modality: text`. The original list is verified bit-exact in bf16 and NF4. Qwen3.5's heterogeneous dense and MoE decoder paths are verified bit-exact against resident controls on CPU; the MoE path also has live streamed-training validation on `Qwen/Qwen3.5-35B-A3B`, whose real 35B run has no resident control because the available hardware could not load it resident.
+- **Llama / Qwen / Qwen3.5 dense and MoE text / Qwen4-Exp text / Mistral / Gemma / Gemma2 / Gemma3-Text / Phi / Phi3** (`qwen3_5`, `qwen3_5_text`, `qwen3_5_moe`, and `qwen3_5_moe_text` route through the qwen3 streamer; `qwen4_exp_text` routes through the Qwen4-Exp streamer), `task: sft`, `backend: transformers`, `modality: text`. The original list is verified bit-exact in bf16 and NF4. Qwen3.5's heterogeneous dense and MoE decoder paths are verified bit-exact against resident controls on CPU; the MoE path also has live streamed-training validation on `Qwen/Qwen3.5-35B-A3B`, whose real 35B run has no resident control because the available hardware could not load it resident. Qwen4-Exp currently has an exact float32 tiny-model parity gate, including its external PLE table; real-checkpoint and NF4 validation are still pending.
 - **Heterogeneous layer keys are allowed only at the presence/absence level.** The sharder reads every layer's safetensors header and the runtime builds the RAM/disk source from those per-layer specs, then merges them into one VRAM buffer pool. A key that appears in multiple layers must keep the same stored shape and dtype everywhere; NF4 weights also keep one `NF4WeightSpec` per short key, validate every packed sidecar against the shard header, and share only the small code tables after proving they are equal.
 - **Batch sizes, gradient accumulation, `--resume` / `--hf-resume`** all now work (v0.72.3).
 - **Pre-Ampere cards (T4, P100, V100, GTX 16xx, RTX 20xx) now stream in fp16 instead of bf16.** Until this fix the store dtype was hardcoded to bf16 on every CUDA device, so the entire free notebook tier was streaming a dtype its GPU has no units for, and nothing said so — it could not fail on the Ampere card every number above was measured on. fp16 is bit-exact against a resident reference of matching numerics, `0.000000e+00` in both quantisations, exactly as bf16 is.
@@ -432,9 +453,9 @@ prints this advice when it sees you accumulating.
 - `lora.use_dora` / `lora.use_vera` / `lora.init_strategy` other than `random` → these initialise from the real base weight, which is on the meta device under streaming
 - `moe_expert_quant` → expert quantization runs only in the resident model-construction path and would otherwise be silently ignored
 - `unfrozen_parameters`, `lisa_enabled`, `packing`, `multipack`, `use_fsdp2_compile`, `train_router_only`, `expand_layers` → each independently rewrites or re-freezes the same layers
-- `stream_source` / `stream_buffers` / `stream_vram_override` / `stream_vram_probe` / `stream_disk_kind` / `stream_pin` set while `stream_layers: false` → a footgun, refused
+- `stream_source` / `stream_ngram_source` / `stream_buffers` / `stream_vram_override` / `stream_vram_probe` / `stream_disk_kind` / `stream_pin` set while `stream_layers: false` → a footgun, refused
 - `stream_vram_probe` on any task other than `sft` → the probe runs a plain causal-LM step, which *is* the SFT step but is not a preference loss. Measured at one matching shape it is conservative there too (6.02 GB against a real DPO step's 5.30 GB, +13.5%), but one shape is not a validation, so it is not offered for `dpo`/`orpo`/`simpo`/`kto` yet
-- an architecture outside the supported list (llama / qwen2 / qwen3, including qwen3_5_moe text aliases / mistral / gemma / gemma2 / gemma3_text / phi / phi3) → named explicitly
+- an architecture outside the supported list (llama / qwen2 / qwen3, including qwen3_5_moe text aliases / qwen4_exp text / mistral / gemma / gemma2 / gemma3_text / phi / phi3) → named explicitly
 
 **Config example:**
 
@@ -495,7 +516,7 @@ output: ./output
 - **"layer streaming needs the base to fit in RAM"** — the base is larger than free RAM. Set `stream_source: auto` to fall back to the NVMe disk tier, free RAM, or pick a smaller base.
 - **"layer streaming needs NVMe or more RAM … the detected disk is 'hdd'"** on a fast cloud disk — a virtio device reports `rotational=1` with no media hint. Detection now measures the disk when the flag is unreliable; if it still misreads yours, set `training.stream_disk_kind: nvme` to force the tier on (`ssd`/`hdd` force it off).
 - **"could not page-lock the base … falling back to a PAGEABLE RAM store"** — expected on a busy machine. Training continues, more slowly. Close other applications to keep the pinned store.
-- **"layer streaming does not support model_type=…"** — the supported list is llama / qwen2 / qwen3, including `qwen3_5_moe` text aliases / mistral / gemma / gemma2 / gemma3_text / phi / phi3. Multimodal `gemma3` is excluded on purpose; use `gemma3_text`.
+- **"layer streaming does not support model_type=…"** — the supported list is llama / qwen2 / qwen3, including `qwen3_5_moe` text aliases / qwen4_exp text / mistral / gemma / gemma2 / gemma3_text / phi / phi3. Multimodal `gemma3` is excluded on purpose; use `gemma3_text`.
 - **"predicted peak … exceeds free VRAM" and you believe it is wrong** — lower `batch_size` or `data.max_length` first. Otherwise there are two escape hatches and they are not interchangeable. `training.stream_vram_probe: true` (`sft` only) **measures** one real forward+backward at your configured shape and decides on that, printing the prediction beside it; it costs one step (1–5 s measured) and it can also refuse a run the formula accepted. `training.stream_vram_override: <bytes>` instead **replaces** the free-VRAM figure the check runs against — that is an assertion you are making, not a measurement, so raising it past a real limit is an OOM on Linux and a silent spill on Windows. Prefer the probe when you want to be told the truth; use the override when you know something the driver cannot report.
 - **The prediction is not equally trustworthy at every sequence length.** Measured on a 4 GB RTX 3050 with SmolLM2-135M streamed in bf16 at batch 1, the formula over-predicts by 8% at seq 4352 (safe) and then **under-predicts — 0.934x the real peak at seq 5120 and 0.787x at 6144**. The grid it was fitted on only ever varied batch size, at seq 256 and 512, so long-context streaming is exactly where it has the least evidence behind it. If you are streaming at multi-thousand-token sequences, turn on `stream_vram_probe`. Record: [`benchmarks/gate-v0.73.1-measured-vram-fit.md`](../benchmarks/gate-v0.73.1-measured-vram-fit.md).
 - **The pre-flight reports the whole card on a capped or shared GPU** — `torch.cuda.mem_get_info()` is a device-level driver query and cannot see `set_per_process_memory_fraction`, a MIG slice, or another process on the same card. Set `training.stream_vram_override` to what your process may actually use; the check then refuses configurations that would exceed *that*, which is also how you rehearse a 4 GB card on a 16 GB one.

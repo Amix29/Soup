@@ -43,6 +43,14 @@ whose `scatter` operator still requires `int64` indices, Soup widens only the
 QSA indexer's local index tensors before LoRA injection; Torch and the upstream
 Transformers class remain unchanged.
 
+With `training.stream_layers: true`, the Qwen4-Exp text decoder is admitted by
+its own parity-tested path. Its very large frozen PLE N-gram table is excluded
+from the decoder-layer shard and can be served from the original Transformers
+safetensors with `training.stream_ngram_source: disk`. Reads are sparse and
+read-only; Soup does not create a second PLE copy in its shard cache. The
+currently installed oMLX/oQ form is an inference checkpoint and is not accepted
+as a Transformers fine-tuning source.
+
 ### Vision Models (with `modality: vision`)
 
 | Model | Size | Supported Formats |

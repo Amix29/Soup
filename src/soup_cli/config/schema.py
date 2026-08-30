@@ -3166,6 +3166,17 @@ class TrainingConfig(BaseModel):
             "tier; 'auto' picks per free RAM."
         ),
     )
+    stream_ngram_source: Literal["auto", "ram", "disk"] = Field(
+        default="auto",
+        description=(
+            "Where Qwen4-Exp's frozen PLE N-gram embedding lives while layer "
+            "streaming. 'disk' gathers only requested rows from the original "
+            "safetensors through a read-only mmap; 'ram' keeps the table in "
+            "CPU RAM; 'auto' uses RAM only when the table and selected base "
+            "tier fit within the measured headroom. Ignored by architectures "
+            "without an external PLE table."
+        ),
+    )
     stream_buffers: int = Field(
         default=DEFAULT_STREAM_BUFFERS,
         ge=MIN_STREAM_BUFFERS,
@@ -5122,6 +5133,7 @@ class SoupConfig(BaseModel):
             # certainly means the user forgot stream_layers=true.
             if (
                 tcfg.stream_source != "auto"
+                or tcfg.stream_ngram_source != "auto"
                 or tcfg.stream_buffers != 2
                 or tcfg.stream_vram_override is not None
                 or tcfg.stream_vram_probe
@@ -5129,7 +5141,8 @@ class SoupConfig(BaseModel):
                 or tcfg.stream_pin is not None
             ):
                 raise ValueError(
-                    "training.stream_source / training.stream_buffers / "
+                    "training.stream_source / training.stream_ngram_source / "
+                    "training.stream_buffers / "
                     "training.stream_vram_override / training.stream_vram_probe "
                     "/ training.stream_disk_kind / training.stream_pin set but "
                     "stream_layers is false; set stream_layers=true to stream the "

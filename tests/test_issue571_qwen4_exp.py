@@ -55,13 +55,13 @@ def test_qwen4_exp_text_is_detected_as_moe_without_numeric_hints():
     assert detect_moe_model(model) is True
 
 
-def test_qwen4_exp_is_not_admitted_to_layer_streaming_by_name_only():
+def test_qwen4_exp_streaming_is_admitted_only_through_its_text_alias():
     from soup_cli.utils.layer_stream import _STREAM_ARCH_ALIASES, SUPPORTED_STREAM_ARCHS
 
-    assert "qwen4_exp" not in SUPPORTED_STREAM_ARCHS
+    assert "qwen4_exp" in SUPPORTED_STREAM_ARCHS
     assert "qwen4_exp_text" not in SUPPORTED_STREAM_ARCHS
     assert "qwen4_exp" not in _STREAM_ARCH_ALIASES
-    assert "qwen4_exp_text" not in _STREAM_ARCH_ALIASES
+    assert _STREAM_ARCH_ALIASES["qwen4_exp_text"] == "qwen4_exp"
 
 
 def _tiny_qwen4_exp_config():

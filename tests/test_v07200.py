@@ -964,6 +964,7 @@ class TestStreamSchemaDefaults:
         cfg = _load(_stream_yaml(training={"stream_layers": False}))
         assert cfg.training.stream_layers is False
         assert cfg.training.stream_source == "auto"
+        assert cfg.training.stream_ngram_source == "auto"
         assert cfg.training.stream_buffers == 2
         assert cfg.training.stream_vram_override is None
 
@@ -1150,6 +1151,17 @@ class TestStreamFootgunRejection:
         with pytest.raises(ValueError, match="stream_layers"):
             _load(_stream_yaml(training={"stream_layers": False, "stream_source": "ram"}))
 
+    def test_stream_ngram_source_without_stream_layers_rejected(self):
+        with pytest.raises(ValueError, match="stream_layers"):
+            _load(
+                _stream_yaml(
+                    training={
+                        "stream_layers": False,
+                        "stream_ngram_source": "disk",
+                    }
+                )
+            )
+
     @pytest.mark.parametrize("stream_pin", [True, False])
     def test_stream_pin_without_stream_layers_rejected(self, stream_pin):
         """#366 criterion 4: stream_pin set while streaming is off is a footgun.
@@ -1177,6 +1189,10 @@ class TestStreamBufferBounds:
     def test_bad_stream_source_rejected(self):
         with pytest.raises(ValueError, match="stream_source"):
             _load(_stream_yaml(training={"stream_source": "network"}))
+
+    def test_bad_stream_ngram_source_rejected(self):
+        with pytest.raises(ValueError, match="stream_ngram_source"):
+            _load(_stream_yaml(training={"stream_ngram_source": "network"}))
 
 
 # ==========================================================================

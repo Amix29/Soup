@@ -84,6 +84,7 @@ SUPPORTED_STREAM_ARCHS = (
     "llama",
     "qwen2",
     "qwen3",
+    "qwen4_exp",
     "mistral",
     "gemma",
     "gemma2",
@@ -100,6 +101,7 @@ _STREAM_ARCH_ALIASES = {
     "qwen3_5_text": "qwen3",
     "qwen3_5_moe": "qwen3",
     "qwen3_5_moe_text": "qwen3",
+    "qwen4_exp_text": "qwen4_exp",
 }
 
 #: The loss path's own arithmetic, in VRAM bytes per logit element. **Measured
