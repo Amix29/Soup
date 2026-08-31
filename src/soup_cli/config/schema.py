@@ -3173,8 +3173,9 @@ class TrainingConfig(BaseModel):
             "streaming. 'disk' gathers only requested rows from the original "
             "safetensors through a read-only mmap; 'ram' keeps the table in "
             "CPU RAM; 'auto' uses RAM only when the table and selected base "
-            "tier fit within the measured headroom. Ignored by architectures "
-            "without an external PLE table."
+            "tier fit within the measured headroom. oMLX/oQ affine PLE tables "
+            "require 'disk' (or 'auto') so only selected rows are dequantized. "
+            "A non-default value warns when the checkpoint has no external PLE table."
         ),
     )
     stream_buffers: int = Field(

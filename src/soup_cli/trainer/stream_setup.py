@@ -39,6 +39,45 @@ console = Console()
 _PROBE_DEFERRAL_CEILING = 4.0
 
 
+def _validate_qwen4_streaming_mode(*, arch: str, task: str, quant: str) -> None:
+    """Keep unvalidated Qwen4 training modes outside the streamed path."""
+    if arch != "qwen4_exp":
+        return
+    if task != "sft":
+        raise ValueError(
+            "Qwen4-Exp layer streaming is initially validated for task='sft' "
+            f"only; got task={task!r}. Preference-loss parity is pending."
+        )
+    if quant != "none":
+        raise ValueError(
+            "Qwen4-Exp layer streaming currently requires quantization='none'. "
+            "Its exact PLE path is validated, but streamed NF4 parity is pending."
+        )
+
+
+def _validate_qwen4_ngram_disk(*, disk_kind: str, weights_dir: str) -> None:
+    """Refuse sparse PLE mmap on media outside the measured SSD classes."""
+    if disk_kind in ("nvme", "ssd"):
+        return
+    raise ValueError(
+        "training.stream_ngram_source='disk' needs an SSD or NVMe "
+        f"checkpoint volume; detected {disk_kind!r} at {weights_dir}. "
+        "Move the checkpoint or set an accurate training.stream_disk_kind override."
+    )
+
+
+def _warn_if_ngram_source_unused(
+    *, arch: str, requested: str, ngram_bytes: int, notify
+) -> None:
+    """Make a user-supplied PLE policy visible when the checkpoint has no PLE."""
+    if arch == "qwen4_exp" and requested != "auto" and not ngram_bytes:
+        notify(
+            "[yellow]training.stream_ngram_source="
+            f"{requested!r} has no effect: this Qwen4 checkpoint has no PLE "
+            "N-gram table.[/]"
+        )
+
+
 @dataclass(frozen=True)
 class _ProbePlan:
     """What the post-build measured probe (#349) needs from the pre-flight.
@@ -288,6 +327,7 @@ class StreamingSetupMixin:
         from soup_cli.utils.layer_shard import (
             QUANT_NF4,
             QUANT_NONE,
+            estimate_oq_stream_cache_bytes,
             fingerprint_source_files,
             inspect_shard_cache,
             resolve_shard_dir,
@@ -347,16 +387,9 @@ class StreamingSetupMixin:
         # an untied head stay at `dtype`, exactly as replace_with_bnb_linear
         # leaves them.
         quant = QUANT_NF4 if tcfg.quantization == "4bit" else QUANT_NONE
-        if arch == "qwen4_exp" and cfg.task != "sft":
-            raise ValueError(
-                "Qwen4-Exp layer streaming is initially validated for task='sft' "
-                f"only; got task={cfg.task!r}. Preference-loss parity is pending."
-            )
-        if arch == "qwen4_exp" and quant != QUANT_NONE:
-            raise ValueError(
-                "Qwen4-Exp layer streaming currently requires quantization='none'. "
-                "Its exact PLE path is validated, but streamed NF4 parity is pending."
-            )
+        _validate_qwen4_streaming_mode(
+            arch=arch, task=getattr(cfg, "task", "sft"), quant=quant
+        )
         # #321 — the streamed skeleton and the shards must quantise with the
         # SAME double-quant setting or the streamed-vs-resident bit-exactness
         # claim breaks. Read the flag once here (resolving the tri-state unset to
@@ -374,6 +407,13 @@ class StreamingSetupMixin:
                 quant=quant,
                 double_quant=double_quant,
             )
+            oq_shard_estimate = estimate_oq_stream_cache_bytes(
+                weights_plan.weights_dir,
+                dtype=dtype,
+                arch=arch,
+            )
+            if oq_shard_estimate is not None:
+                shard_estimate = oq_shard_estimate
             cached = None
             if not weights_plan.needs_materialization:
                 cached, _reason = inspect_shard_cache(
@@ -516,7 +556,18 @@ class StreamingSetupMixin:
         ngram_source = "disk"
         if ngram_bytes:
             requested_ngram = tcfg.stream_ngram_source
-            if requested_ngram == "auto":
+            oq_ngram = any(
+                hasattr(spec, "bits") for spec in index.external_tensors.values()
+            )
+            if oq_ngram and requested_ngram == "ram":
+                raise ValueError(
+                    "oQ PLE embeddings require "
+                    "training.stream_ngram_source='disk' (or 'auto'): the packed "
+                    "source stays read-only and only requested rows are dequantized."
+                )
+            if oq_ngram:
+                ngram_source = "disk"
+            elif requested_ngram == "auto":
                 ram_budget = free_ram * RAM_TIER_HEADROOM
                 base_in_ram = (
                     store_total
@@ -530,21 +581,24 @@ class StreamingSetupMixin:
                 ngram_source = requested_ngram
             storage = "CPU RAM"
             if ngram_source == "disk":
-                ngram_disk_kind = resolve_disk_kind(
+                ngram_disk = resolve_disk_kind(
                     weights_dir, tcfg.stream_disk_kind, notify=console.print
                 )
-                if ngram_disk_kind not in ("nvme", "ssd"):
-                    raise ValueError(
-                        "training.stream_ngram_source='disk' needs an SSD or NVMe "
-                        f"checkpoint volume; detected {ngram_disk_kind!r} at "
-                        f"{weights_dir}. Move the checkpoint or set an accurate "
-                        "training.stream_disk_kind override."
-                    )
+                ngram_disk_kind = ngram_disk.kind
+                _validate_qwen4_ngram_disk(
+                    disk_kind=ngram_disk_kind, weights_dir=weights_dir
+                )
                 storage = f"read-only {ngram_disk_kind.upper()} mmap"
             console.print(
                 f"[cyan]Qwen4 PLE:[/] {ngram_bytes / 1e9:.2f} GB via {storage} "
                 f"(stream_ngram_source={tcfg.stream_ngram_source!r})"
             )
+        _warn_if_ngram_source_unused(
+            arch=arch,
+            requested=getattr(tcfg, "stream_ngram_source", "auto"),
+            ngram_bytes=ngram_bytes,
+            notify=console.print,
+        )
         # Checked BEFORE build_stream_plan so a `ram`-only run is refused with
         # the message about stream_source rather than choose_tier's generic
         # "needs NVMe or more RAM" — and without paying the ~9 s disk probe for

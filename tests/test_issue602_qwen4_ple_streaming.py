@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 
@@ -10,7 +11,10 @@ import pytest
 
 
 def _tiny_qwen4_config(*, ple: bool = True):
-    from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
+    try:
+        from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
+    except ImportError:
+        pytest.skip("installed Transformers release does not include qwen4_exp yet")
 
     text = Qwen4ExpTextConfig(
         vocab_size=64,
@@ -191,6 +195,25 @@ def test_sparse_reader_rejects_escape_and_out_of_range_rows(tmp_path):
     reader.close()
 
 
+def test_ple_header_rejects_shape_range_mismatch_and_past_eof():
+    from soup_cli.utils.qwen4_ple import _tensor_rows_from_header
+
+    with pytest.raises(ValueError, match="byte range"):
+        _tensor_rows_from_header(
+            {"ple": {"dtype": "F32", "shape": [2, 2], "data_offsets": [0, 4]}},
+            data_start=32,
+            file_size=64,
+            source_key="ple",
+        )
+    with pytest.raises(ValueError, match="past end"):
+        _tensor_rows_from_header(
+            {"ple": {"dtype": "F32", "shape": [2, 2], "data_offsets": [0, 16]}},
+            data_start=32,
+            file_size=47,
+            source_key="ple",
+        )
+
+
 def test_qwen4_sharder_keeps_ple_in_original_checkpoint(tmp_path):
     from safetensors import safe_open
 
@@ -229,28 +252,201 @@ def test_qwen4_sharder_keeps_ple_in_original_checkpoint(tmp_path):
             assert all("ngram_embedding.weight" not in key for key in handle.keys())
 
 
-def test_qwen4_sharder_rejects_omlx_oq_before_writing_cache(tmp_path):
+@pytest.mark.parametrize(
+    ("bits", "words", "scale", "bias", "expected"),
+    [
+        (
+            4,
+            [3437096703, 2291772091, 1146447479, 1122867],
+            -2.066666603088379,
+            31.0,
+            [0.0, 0.0, 2.0666675567626953, 2.0666675567626953],
+        ),
+        (
+            5,
+            [1975416799, 978769862, 902792293, 3343013046, 4469268],
+            -1.0,
+            31.0,
+            [0.0, 1.0, 2.0, 3.0],
+        ),
+        (
+            6,
+            [
+                2011676543,
+                3144664893,
+                2251909030,
+                375498526,
+                2735620389,
+                2164256,
+            ],
+            -0.4920634925365448,
+            31.0,
+            [0.0, 0.9841270446777344, 1.9682540893554688, 2.952381134033203],
+        ),
+        (
+            8,
+            [
+                3874486271,
+                3318666974,
+                2779624893,
+                2223805596,
+                1667986299,
+                1112167002,
+                556347706,
+                528409,
+            ],
+            -0.12156862765550613,
+            31.0,
+            [0.0, 0.9725494384765625, 1.945098876953125, 3.039215087890625],
+        ),
+    ],
+)
+def test_oq_affine_decoder_matches_mlx_vectors(bits, words, scale, bias, expected):
     import torch
+
+    from soup_cli.utils.oq_affine import AffineQuantSpec, dequantize_affine
+
+    actual = dequantize_affine(
+        torch.tensor([words], dtype=torch.uint32),
+        torch.tensor([[scale]]),
+        torch.tensor([[bias]]),
+        spec=AffineQuantSpec(bits=bits, group_size=32),
+        dtype="float32",
+    )
+
+    torch.testing.assert_close(
+        actual[0, :4], torch.tensor(expected), rtol=0, atol=0
+    )
+
+
+def test_qwen4_sharder_dequantizes_omlx_oq_without_copying_companions(tmp_path):
+    import torch
+    from safetensors import safe_open
     from safetensors.torch import save_file
 
-    from soup_cli.utils.layer_shard import shard_checkpoint
+    from soup_cli.utils.layer_shard import layer_shard_path, shard_checkpoint
 
     weights = tmp_path / "weights"
     shards = tmp_path / "shards"
     weights.mkdir()
     save_file(
         {
-            "language_model.model.layers.0.proj.weight": torch.ones(2, 2),
-            "language_model.model.layers.0.proj.biases": torch.zeros(2),
+            "language_model.model.layers.0.proj.weight": torch.tensor(
+                [[0, 1, 2, 3], [4, 5, 6, 7]], dtype=torch.uint32
+            ),
+            "language_model.model.layers.0.proj.scales": torch.ones(
+                (2, 1), dtype=torch.bfloat16
+            ),
+            "language_model.model.layers.0.proj.biases": torch.zeros(
+                (2, 1), dtype=torch.bfloat16
+            ),
+            "language_model.model.layers.0.conv1d.weight": torch.arange(
+                24, dtype=torch.float32
+            ).reshape(2, 12, 1),
+            (
+                "language_model.model.layers.0.ple.ple_embedding."
+                "ngram_embedding.shards.0.weight"
+            ): torch.tensor([[0, 1, 2, 3]] * 3, dtype=torch.uint32),
+            (
+                "language_model.model.layers.0.ple.ple_embedding."
+                "ngram_embedding.shards.0.scales"
+            ): torch.ones((3, 1), dtype=torch.bfloat16),
+            (
+                "language_model.model.layers.0.ple.ple_embedding."
+                "ngram_embedding.shards.0.biases"
+            ): torch.zeros((3, 1), dtype=torch.bfloat16),
+            "vision_tower.ignored.weight": torch.ones(2, 2),
+            "mtp.ignored.weight": torch.ones(2, 2),
         },
         weights / "model.safetensors",
     )
+    (weights / "config.json").write_text(
+        json.dumps(
+            {
+                "quantization_config": {
+                    "bits": 4,
+                    "group_size": 32,
+                    "mode": "affine",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
 
-    with pytest.raises(ValueError, match="oMLX/oQ.*inference-only"):
-        shard_checkpoint(
-            str(weights), str(shards), dtype="float32", arch="qwen4_exp"
-        )
-    assert list(shards.iterdir()) == []
+    index = shard_checkpoint(
+        str(weights), str(shards), dtype="float32", arch="qwen4_exp"
+    )
+
+    assert index.n_layers == 1
+    assert index.layer_keys == ("conv1d.weight", "proj.weight")
+    assert len(index.external_tensors) == 1
+    external = next(iter(index.external_tensors.values()))
+    assert external.shape == (3, 32)
+    assert external.bits == 4
+    with safe_open(layer_shard_path(str(shards), 0), framework="pt") as handle:
+        assert handle.keys() == ["conv1d.weight", "proj.weight"]
+        actual = handle.get_tensor("proj.weight")
+        conv = handle.get_tensor("conv1d.weight")
+    assert actual.shape == (2, 32)
+    assert conv.shape == (2, 1, 12)
+    assert not any(key.endswith((".scales", ".biases")) for key in index.layer_keys)
+
+
+def test_oq_ple_reader_dequantizes_only_selected_read_only_rows(tmp_path):
+    import torch
+    from safetensors.torch import save_file
+
+    from soup_cli.utils.layer_shard import OQExternalTensorPart, OQExternalTensorSpec
+    from soup_cli.utils.qwen4_ple import OQShardedSafeTensorRowReader
+
+    weights = tmp_path / "weights"
+    weights.mkdir()
+    source = weights / "model.safetensors"
+    bits = 5
+    rows = []
+    for offset in range(4):
+        stream = sum(((value + offset) % 32) << (bits * value) for value in range(32))
+        rows.append([(stream >> (32 * word)) & 0xFFFFFFFF for word in range(bits)])
+    packed = torch.tensor(rows, dtype=torch.uint32)
+    scales = torch.tensor([[0.5], [1.0], [1.5], [2.0]], dtype=torch.bfloat16)
+    biases = torch.tensor([[1.0], [2.0], [3.0], [4.0]], dtype=torch.bfloat16)
+    save_file(
+        {"ple.weight": packed, "ple.scales": scales, "ple.biases": biases},
+        source,
+    )
+    part = OQExternalTensorPart(
+        source_file=source.name,
+        weight_key="ple.weight",
+        scales_key="ple.scales",
+        biases_key="ple.biases",
+        packed_shape=tuple(packed.shape),
+        stats_shape=tuple(scales.shape),
+        packed_dtype="U32",
+        stats_dtype="BF16",
+    )
+    spec = OQExternalTensorSpec(
+        parts=(part,),
+        shape=(4, 32),
+        dtype="float32",
+        bits=bits,
+        group_size=32,
+        mode="affine",
+    )
+    before = _sha256(source)
+    reader = OQShardedSafeTensorRowReader(str(weights), spec)
+    ids = torch.tensor([[3, 1, 3]])
+
+    actual = reader.gather(ids)
+
+    quantized = torch.tensor(
+        [[(value + offset) % 32 for value in range(32)] for offset in (3, 1, 3)],
+        dtype=torch.float32,
+    )
+    expected = quantized * scales[[3, 1, 3]].float() + biases[[3, 1, 3]].float()
+    torch.testing.assert_close(actual.squeeze(0), expected, rtol=0, atol=0)
+    assert reader.nbytes == packed.numel() * 4 + (scales.numel() + biases.numel()) * 2
+    reader.close()
+    assert _sha256(source) == before
 
 
 @pytest.mark.parametrize("device", ["cpu", "mps"])
@@ -303,9 +499,9 @@ def test_tiny_qwen4_ple_matches_resident_forward_loss_and_lora_gradients(
         torch.testing.assert_close(actual.loss, expected.loss, rtol=0, atol=0)
     else:
         # MPS may select a different reduction schedule once PEFT wraps a
-        # projection, even with its zero-initialised B matrix. The measured
-        # divergence on M4 Max is <= 1.49e-8 in float32; the CPU oracle above
-        # remains bit-exact and guards the PLE row mapping itself.
+        # projection, even with its zero-initialised B matrix. The MPS gate uses
+        # a narrow numerical tolerance; the CPU oracle above remains bit-exact
+        # and guards the PLE row mapping itself.
         torch.testing.assert_close(actual.logits, expected.logits, rtol=3e-4, atol=2e-8)
         torch.testing.assert_close(actual.loss, expected.loss, rtol=3e-4, atol=2e-8)
     actual.loss.backward()
@@ -335,3 +531,54 @@ def test_qwen4_streaming_gate_and_ngram_config():
     assert TrainingConfig(stream_ngram_source="disk").stream_ngram_source == "disk"
     with pytest.raises(ValueError, match="stream_ngram_source"):
         TrainingConfig(stream_ngram_source="network")
+
+
+def test_qwen4_streaming_refuses_unsupported_task_by_name():
+    from soup_cli.trainer.stream_setup import _validate_qwen4_streaming_mode
+
+    with pytest.raises(ValueError, match="task='sft'"):
+        _validate_qwen4_streaming_mode(
+            arch="qwen4_exp", task="dpo", quant="none"
+        )
+
+
+def test_qwen4_streaming_refuses_quantized_base_by_name():
+    from soup_cli.trainer.stream_setup import _validate_qwen4_streaming_mode
+
+    with pytest.raises(ValueError, match="quantization='none'"):
+        _validate_qwen4_streaming_mode(
+            arch="qwen4_exp", task="sft", quant="nf4"
+        )
+
+
+def test_qwen4_ple_disk_streaming_refuses_non_ssd_by_name():
+    from soup_cli.trainer.stream_setup import _validate_qwen4_ngram_disk
+
+    with pytest.raises(ValueError, match="needs an SSD or NVMe"):
+        _validate_qwen4_ngram_disk(disk_kind="hdd", weights_dir="/slow/model")
+
+
+def test_qwen4_stream_ngram_source_warns_when_checkpoint_has_no_ple():
+    from soup_cli.trainer.stream_setup import _warn_if_ngram_source_unused
+
+    messages = []
+    _warn_if_ngram_source_unused(
+        arch="qwen4_exp", requested="disk", ngram_bytes=0, notify=messages.append
+    )
+
+    assert len(messages) == 1
+    assert "has no effect" in messages[0]
+
+
+def test_external_ple_descriptor_reapplies_a_production_sized_element_cap():
+    from soup_cli.utils.layer_shard import ExternalTensorPart, ExternalTensorSpec
+
+    oversized = ExternalTensorPart(
+        source_file="model.safetensors",
+        source_key="ple.weight",
+        shape=(2**36 + 1, 1),
+        dtype="F32",
+    )
+
+    with pytest.raises(ValueError, match="element cap"):
+        ExternalTensorSpec(parts=(oversized,), shape=oversized.shape, dtype="F32")

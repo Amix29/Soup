@@ -124,7 +124,7 @@ training:
   quantization: 4bit       # NF4 — ~4x smaller store, so 8B fits a 4 GB card
   batch_size: 4            # bigger batches amortise the weight read
   stream_source: auto      # RAM when it fits, NVMe disk when it does not
-  stream_ngram_source: auto # Qwen4 PLE: RAM when it fits, otherwise read-only SSD
+  stream_ngram_source: auto # Qwen4 PLE: RAM if dense/fitting, read-only SSD for oQ
   seed: 1234               # new in v0.73.0
 ```
 

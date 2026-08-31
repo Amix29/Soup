@@ -22,9 +22,16 @@ from typing import Any, Mapping, Tuple
 
 _HEADER_LIMIT = 100 * 1024 * 1024
 _DTYPE_INFO = {
+    "U32": (4, "<u4", "uint32"),
     "BF16": (2, "<u2", "bfloat16"),
     "F16": (2, "<f2", "float16"),
     "F32": (4, "<f4", "float32"),
+}
+_TORCH_DTYPE_NAMES = {
+    **{name: info[2] for name, info in _DTYPE_INFO.items()},
+    "bfloat16": "bfloat16",
+    "float16": "float16",
+    "float32": "float32",
 }
 
 
@@ -349,6 +356,129 @@ class ShardedSafeTensorRowReader:
             pass
 
 
+class OQAffinePartRowReader:
+    """Read and dequantize selected rows from one packed oQ PLE fragment."""
+
+    def __init__(self, weights_dir: str, part: Any, spec: Any, container: Any) -> None:
+        from soup_cli.utils.oq_affine import AffineQuantSpec, logical_width
+
+        self.shape = (
+            int(part.packed_shape[0]),
+            logical_width(int(part.packed_shape[1]), int(spec.bits)),
+        )
+        self.dtype = str(spec.dtype)
+        self.quant_spec = AffineQuantSpec(
+            bits=int(spec.bits),
+            group_size=int(spec.group_size),
+            mode=str(spec.mode),
+        )
+        common = {
+            "weights_dir": weights_dir,
+            "source_file": part.source_file,
+            "_container": container,
+        }
+        self.weight = SafeTensorRowReader(
+            source_key=part.weight_key,
+            expected_shape=part.packed_shape,
+            expected_dtype=part.packed_dtype,
+            **common,
+        )
+        self.scales = SafeTensorRowReader(
+            source_key=part.scales_key,
+            expected_shape=part.stats_shape,
+            expected_dtype=part.stats_dtype,
+            **common,
+        )
+        self.biases = SafeTensorRowReader(
+            source_key=part.biases_key,
+            expected_shape=part.stats_shape,
+            expected_dtype=part.stats_dtype,
+            **common,
+        )
+        self.closed = False
+
+    @property
+    def nbytes(self) -> int:
+        return self.weight.nbytes + self.scales.nbytes + self.biases.nbytes
+
+    def gather(self, row_ids: Any):
+        if self.closed:
+            raise RuntimeError("oQ PLE row reader is closed")
+        from soup_cli.utils.oq_affine import dequantize_affine
+
+        packed = self.weight.gather(row_ids)
+        scales = self.scales.gather(row_ids)
+        biases = self.biases.gather(row_ids)
+        return dequantize_affine(
+            packed,
+            scales,
+            biases,
+            spec=self.quant_spec,
+            dtype=self.dtype,
+        )
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        self.weight.close()
+        self.scales.close()
+        self.biases.close()
+
+
+class OQShardedSafeTensorRowReader:
+    """Logical row gather over packed oQ PLE fragments on a read-only mmap."""
+
+    def __init__(self, weights_dir: str, spec: Any) -> None:
+        self.shape = tuple(spec.shape)
+        self.dtype = str(spec.dtype)
+        containers = {}
+        try:
+            for part in spec.parts:
+                path = _validated_source_path(weights_dir, part.source_file)
+                if part.source_file not in containers:
+                    containers[part.source_file] = _SafeTensorContainer(path)
+            self.parts = tuple(
+                OQAffinePartRowReader(
+                    weights_dir,
+                    part,
+                    spec,
+                    containers[part.source_file],
+                )
+                for part in spec.parts
+            )
+        except BaseException:
+            for container in containers.values():
+                container.close()
+            raise
+        self.containers = tuple(containers.values())
+        self.closed = False
+
+    @property
+    def nbytes(self) -> int:
+        return sum(part.nbytes for part in self.parts)
+
+    def gather(self, row_ids: Any):
+        if self.closed:
+            raise RuntimeError("oQ PLE row reader is closed")
+        return _gather_sharded(row_ids, self.shape, self.dtype, self.parts)
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        for part in self.parts:
+            part.close()
+        for container in self.containers:
+            container.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except BaseException:
+            pass
+
+
 class ShardedRamRowReader:
     """Frozen CPU-resident PLE parts without a second concatenation buffer."""
 
@@ -398,7 +528,7 @@ def _gather_sharded(
     flat = ids.reshape(-1)
     if flat.numel() == 0:
         return torch.empty(
-            (*ids.shape, shape[1]), dtype=getattr(torch, _DTYPE_INFO[dtype][2])
+            (*ids.shape, shape[1]), dtype=getattr(torch, _TORCH_DTYPE_NAMES[dtype])
         )
     minimum = int(flat.min())
     maximum = int(flat.max())
@@ -407,7 +537,7 @@ def _gather_sharded(
             f"PLE row id outside [0, {shape[0]}): min={minimum}, max={maximum}"
         )
     output = torch.empty(
-        (flat.numel(), shape[1]), dtype=getattr(torch, _DTYPE_INFO[dtype][2])
+        (flat.numel(), shape[1]), dtype=getattr(torch, _TORCH_DTYPE_NAMES[dtype])
     )
     row_start = 0
     for part in parts:
@@ -438,7 +568,7 @@ def _disk_embedding(reader: SafeTensorRowReader):
             # Transformers only consults weight.device before calling us. A
             # non-persistent zero-row buffer provides that contract without
             # pretending the 95-GiB table is a resident parameter.
-            dtype = getattr(torch, _DTYPE_INFO[reader.dtype][2])
+            dtype = getattr(torch, _TORCH_DTYPE_NAMES[reader.dtype])
             self.register_buffer(
                 "weight",
                 torch.empty((0, reader.shape[1]), dtype=dtype),
@@ -473,7 +603,16 @@ def install_qwen4_ple_embeddings(
                 )
             module_name = parameter_name[: -len(".weight")]
             parent, attribute = _module_for_name(model, module_name)
-            if source == "ram":
+            is_oq = hasattr(spec, "bits")
+            if is_oq and source == "ram":
+                raise ValueError(
+                    "oQ PLE embeddings must use training.stream_ngram_source='disk': "
+                    "the packed source is read-only and only requested rows are "
+                    "dequantized"
+                )
+            if is_oq:
+                reader = OQShardedSafeTensorRowReader(weights_dir, spec)
+            elif source == "ram":
                 reader = ShardedRamRowReader(weights_dir, spec)
             else:
                 reader = ShardedSafeTensorRowReader(weights_dir, spec)

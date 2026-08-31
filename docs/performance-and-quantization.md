@@ -264,22 +264,35 @@ soup train --config soup.yaml
 **Qwen3.8-Flash-Next / Qwen4-Exp PLE.** The frozen PLE N-gram table is not a
 decoder-layer weight for storage purposes: putting it in the PLE layer's shard
 would make the shared layer buffer as large as the whole table. Soup keeps the
-Transformers checkpoint's row-contiguous `ngram_embedding.shard_*` tensors in
-place. `stream_ngram_source: disk` opens those original safetensors read-only
-and gathers only the rows requested by the current tokens; it never rewrites or
-copies the table into Soup's shard cache. `ram` loads the same parts into CPU
-RAM without concatenating a second full table, and `auto` selects RAM only when
-the measured table plus the selected base tier fits the host-memory headroom.
+checkpoint's row-contiguous `ngram_embedding.shard_*` tensors in place.
+`stream_ngram_source: disk` opens those original safetensors read-only and
+gathers only the rows requested by the current tokens; it never rewrites or
+copies the table into Soup's shard cache. For dense Transformers checkpoints,
+`ram` loads the same parts into CPU RAM without concatenating a second full
+table, and `auto` selects RAM only when the measured table plus the selected
+base tier fits the host-memory headroom.
+
+oMLX/oQ affine Qwen4 bundles are supported by this narrow text-only path. Soup
+dequantizes each frozen decoder layer once into the reusable stream cache and
+maps the fused Switch-MLP expert weights to the Transformers decoder. The much
+larger packed PLE table remains in the original checkpoint: only requested rows
+are dequantized, so oQ requires `stream_ngram_source: disk` (or `auto`). The
+vision tower and MTP component are ignored because the instantiated model is
+`AutoModelForCausalLM`, not the multimodal or speculative-decoding wrapper.
 The CPU parity gate covers exact rows, logits, loss, LoRA gradients, source-file
-non-mutation, and mapping cleanup. On the M4 Max, the same float32 streamed
-forward/backward passed with a measured maximum logit difference of 1.49e-8
-versus resident (the zero-LoRA PEFT wrapper changes an MPS reduction schedule),
-while the CPU row/logit/loss oracle remains bit-exact. Production-checkpoint
-throughput and peak memory remain unmeasured. This path requires an official dense Transformers
-safetensors checkpoint; oMLX/oQ inference checkpoints are not trainable inputs.
-The initial gate is deliberately narrow: `task: sft` and
-`quantization: none`. Preference-loss and streamed-NF4 parity are pending and
-those Qwen4 combinations fail before sharding.
+non-mutation, and mapping cleanup. The same float32 tiny-checkpoint gate passes
+on M4 Max within its published MPS tolerance; CPU remains the bit-exact oracle.
+Production-checkpoint throughput and peak memory remain unmeasured. The initial
+gate is deliberately narrow: `task: sft` and `quantization: none` (the latter is
+Soup's optional NF4 transform, not the accepted oQ source encoding).
+Preference-loss and streamed-NF4 parity are pending and those Qwen4 combinations
+fail before sharding. Resident-versus-streamed Qwen4 parity has only been run in
+float32; CUDA selects BF16, but a BF16 CUDA parity gate has not been measured and
+production readiness on that path remains pending. The production 176.9B oQ
+checkpoint completed cache construction and training setup on M4 Max, but its
+one-step smoke was stopped without completing an optimizer step because the
+workload destabilized the host. It is not validated as trainable on a 128 GiB
+Mac; see the [M4 Max gate record](../benchmarks/gate-qwen4-ple-m4-max.md).
 
 **Apple Silicon is experimental.** With `backend: transformers`, MPS uses a pageable CPU
 source and MPS layer buffers; host pinning is disabled. PyTorch 2.7+ may otherwise turn
