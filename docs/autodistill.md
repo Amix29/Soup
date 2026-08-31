@@ -412,10 +412,13 @@ be attempted.
 `tests/fixtures/autodistill/v1/` contains:
 
 - a fully explicit plan with no runtime profile;
-- a three-token-vocabulary capture row where selected mass is 0.9 and residual tail is 0.1;
-- a byte-counted and SHA-256-committed JSONL shard;
+- teacher-expert and student-rollout capture rows over a three-token vocabulary, where selected
+  mass is 0.9 and residual tail is 0.1;
+- a byte-counted and SHA-256-committed JSONL shard reconstructed from canonical capture data so
+  checkout newline conversion cannot alter its committed bytes;
 - a student-rollout reservation/commit ledger.
 
 The tests cover frozen/strict models, missing policy fields, tampered estimates, no heavy import,
-dataset canonicalization, top-k+tail mass, `k = vocab` dense equivalence, corruption, state skips,
-student exactly-once consumption, explicit expert replay, and every resume decision.
+dataset canonicalization, student-rollout requirements, top-k/forced union and residual-tail mass,
+`k = vocab` dense equivalence, path traversal, corruption, checkout-newline independence, state
+skips, contiguous exactly-once consumption, chained expert replay, and every resume decision.
