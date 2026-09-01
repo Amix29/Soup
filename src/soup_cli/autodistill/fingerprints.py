@@ -87,6 +87,16 @@ def verify_dataset_fingerprint(
 ) -> None:
     """Verify ordered source bytes and their combined canonical JSONL identity."""
 
+    verified_dataset_bytes(plan, dataset_root=dataset_root)
+
+
+def verified_dataset_bytes(
+    plan: AutoDistillPlan,
+    *,
+    dataset_root: str | os.PathLike[str],
+) -> bytes:
+    """Return bound canonical JSONL bytes after all source and logical checks pass."""
+
     root = Path(dataset_root)
     normalized_parts: list[bytes] = []
     row_count = 0
@@ -105,3 +115,4 @@ def verify_dataset_fingerprint(
         raise ArtifactCorruptionError("dataset normalized sha256 mismatch")
     if row_count != plan.dataset.rows:
         raise ArtifactCorruptionError("dataset normalized row count mismatch")
+    return normalized_bytes

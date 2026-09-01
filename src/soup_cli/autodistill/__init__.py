@@ -16,6 +16,7 @@ from soup_cli.autodistill.contract import (
     build_plan_estimate,
 )
 from soup_cli.autodistill.fingerprints import (
+    verified_dataset_bytes,
     verify_dataset_fingerprint,
     verify_teacher_fingerprint,
     verify_tokenizer_fingerprint,
@@ -38,4 +39,5 @@ __all__ = [
     "verify_dataset_fingerprint",
     "verify_teacher_fingerprint",
     "verify_tokenizer_fingerprint",
+    "verified_dataset_bytes",
 ]

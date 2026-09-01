@@ -234,6 +234,37 @@ available -> reserved -> committed
   `replay_of` equals the prior committed event hash. The source artifact stays immutable.
 - Replay policy is explicit in every plan; it is not inferred from a filename or task.
 
+### 7.4 Milestone B1 MLX teacher boundary
+
+The first Apple Silicon capture worker is an internal, opt-in implementation surface; it
+does not add a task, CLI command, or `SoupConfig` field. The controller starts a fresh Python
+process whose request accepts teacher, tokenizer, dataset, and publication roots but no student
+root. The controller writes its final receipt only after that child has exited successfully and
+the exact `available` manifest has been reopened. The plan still contains the immutable student
+fingerprint as future-consumer metadata; it is never resolved or loaded during capture.
+
+For this boundary, MLX-LM loads both model and tokenizer from the same local checkpoint root.
+`capture.backend_version` is the exact installed `mlx-lm` distribution version and the tokenizer
+renderer is `mlx-lm@<version>`. Both must match the plan before publication. MLX/MLX-LM remain
+lazy imports inside the worker.
+
+The bound dataset is canonical JSONL with versioned, already-tokenized rows:
+
+```json
+{"schema":"soup.autodistill.tokenized-teacher-example.v1","example_id":"ex-1","prompt_token_ids":[1,2],"target_token_ids":[3,4]}
+```
+
+Prompt IDs are non-empty because a causal next-token distribution needs a preceding position.
+Every source byte, normalized row, tokenizer file, teacher config, and listed teacher weight is
+verified before model load. A worker request selects a half-open example range, but the complete
+dataset fingerprint and total planned target-token count are verified before that shard subset is
+accepted. Ranges never split one example trajectory.
+
+Without truncation, one causal forward captures all target positions in an example. Once the
+declared sequence limit requires truncation, the worker evaluates the exact recorded context for
+each position. Only the final vocabulary row is converted to float32 host values; selected IDs are
+not renormalized. Process exit, rather than cache reclamation alone, is the memory-isolation gate.
+
 ## 8. Transactional publication, resume, and corruption
 
 The capture writer follows a write-last manifest protocol on one filesystem:
