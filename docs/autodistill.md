@@ -248,6 +248,13 @@ For this boundary, MLX-LM loads both model and tokenizer from the same local che
 renderer is `mlx-lm@<version>`. Both must match the plan before publication. MLX/MLX-LM remain
 lazy imports inside the worker.
 
+The worker also verifies the loaded floating-parameter dtype against `capture.dtype`. An
+unquantized checkpoint uses the literal quantization identity `none`. If `config.json` contains
+`quantization` or `quantization_config`, its identity is
+`config-sha256:<sha256(canonical JSON of those active fields)>`. This binds the plan to the exact
+quantization recipe without pretending that names such as `4-bit` uniquely identify a runtime.
+The observed dtype and quantization identity are repeated in the child receipt.
+
 The bound dataset is canonical JSONL with versioned, already-tokenized rows:
 
 ```json

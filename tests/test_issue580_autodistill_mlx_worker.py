@@ -99,6 +99,12 @@ class _Logits:
         return _Row(values)
 
 class _Model:
+    class _Parameter:
+        dtype = "mlx.core.float32"
+
+    def parameters(self):
+        return {{"weight": self._Parameter()}}
+
     def __call__(self, inputs):
         _trace("forward:" + str(len(inputs[0])))
         return _Logits(len(inputs[0]))
@@ -251,6 +257,11 @@ def test_real_child_process_captures_full_trajectory_and_exits(monkeypatch, tmp_
     assert result.student_loaded is False
     assert result.worker_pid != os.getpid()
     assert result.row_count == result.token_count == 3
+    receipt = json.loads(
+        (publication_root / ".workers/transaction-0001/worker-receipt.json").read_bytes()
+    )
+    assert receipt["inference_dtype"] == "float32"
+    assert receipt["quantization"] == "none"
     persisted = MlxTeacherCaptureResult.model_validate_json(
         (publication_root / ".workers/transaction-0001/result.json").read_bytes()
     )
@@ -280,6 +291,44 @@ def test_runtime_version_mismatch_fails_before_publication(monkeypatch, tmp_path
     publication_root = tmp_path / "publication"
 
     with pytest.raises(RuntimeError, match="does not match capture.backend_version"):
+        run_mlx_teacher_capture_process(
+            plan=plan,
+            teacher_root=teacher_root,
+            tokenizer_root=tokenizer_root,
+            dataset_root=dataset_root,
+            publication_root=publication_root,
+            shard_id="shard-0001",
+            transaction_id="transaction-0001",
+            python_executable=sys.executable,
+            timeout_seconds=30,
+        )
+
+    assert not (publication_root / "shards/shard-0001").exists()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("dtype", "bfloat16", "floating parameter dtypes"),
+        ("quantization", "q4", "quantization does not match"),
+    ],
+)
+def test_declared_runtime_identity_must_match_loaded_teacher(
+    monkeypatch,
+    tmp_path,
+    field,
+    value,
+    message,
+):
+    plan, teacher_root, tokenizer_root, dataset_root = _local_plan(tmp_path)
+    payload = plan.model_dump(mode="json", by_alias=True)
+    payload["capture"][field] = value
+    plan = AutoDistillPlan.model_validate(payload)
+    fake_root = _write_fake_mlx_runtime(tmp_path)
+    _runtime_environment(monkeypatch, tmp_path, fake_root)
+    publication_root = tmp_path / "publication"
+
+    with pytest.raises(RuntimeError, match=message):
         run_mlx_teacher_capture_process(
             plan=plan,
             teacher_root=teacher_root,

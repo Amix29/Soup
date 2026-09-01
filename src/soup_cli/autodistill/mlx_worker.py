@@ -123,6 +123,8 @@ class MlxTeacherWorkerReceipt(_FrozenModel):
     token_count: int = Field(gt=0)
     mlx_version: str = Field(min_length=1, max_length=128)
     mlx_lm_version: str = Field(min_length=1, max_length=128)
+    inference_dtype: Literal["float16", "bfloat16", "float32"]
+    quantization: str = Field(min_length=1, max_length=128)
 
 
 class MlxTeacherCaptureResult(_FrozenModel):
@@ -244,10 +246,66 @@ def _logit_row(output: object, *, context_length: int, row_index: int, vocab_siz
     return logits[0, row_index, :]
 
 
+def _quantization_descriptor(teacher_root: str) -> str:
+    config_path = Path(teacher_root) / "config.json"
+    config = json.loads(config_path.read_bytes())
+    if not isinstance(config, dict):
+        raise ValueError("teacher config.json must contain a JSON object")
+    active = {
+        key: config[key]
+        for key in ("quantization", "quantization_config")
+        if config.get(key) is not None
+    }
+    if not active:
+        return "none"
+    return f"config-sha256:{hashlib.sha256(canonical_json_bytes(active)).hexdigest()}"
+
+
+def _parameter_dtype(value: object) -> str | None:
+    dtype = getattr(value, "dtype", None)
+    if dtype is None:
+        return None
+    name = str(dtype).removeprefix("mlx.core.")
+    if name in {"float16", "bfloat16", "float32"}:
+        return name
+    return None
+
+
+def _floating_parameter_dtypes(parameters: object) -> set[str]:
+    if isinstance(parameters, dict):
+        values = parameters.values()
+    elif isinstance(parameters, (list, tuple)):
+        values = parameters
+    else:
+        dtype = _parameter_dtype(parameters)
+        return {dtype} if dtype is not None else set()
+    observed: set[str] = set()
+    for value in values:
+        observed.update(_floating_parameter_dtypes(value))
+    return observed
+
+
+def _verify_capture_runtime(request: MlxTeacherCaptureRequest, model: object) -> tuple[str, str]:
+    quantization = _quantization_descriptor(request.teacher_root)
+    if quantization != request.plan.capture.quantization:
+        raise ValueError("loaded teacher quantization does not match capture.quantization")
+    parameters_method = getattr(model, "parameters", None)
+    if not callable(parameters_method):
+        raise ValueError("MLX teacher does not expose parameters for dtype verification")
+    dtypes = _floating_parameter_dtypes(parameters_method())
+    expected = request.plan.capture.dtype
+    if dtypes != {expected}:
+        rendered = ", ".join(sorted(dtypes)) or "none"
+        raise ValueError(
+            f"loaded teacher floating parameter dtypes ({rendered}) do not match {expected}"
+        )
+    return expected, quantization
+
+
 def _capture_examples_with_mlx(
     request: MlxTeacherCaptureRequest,
     examples: tuple[TokenizedTeacherExample, ...],
-) -> tuple[tuple[CaptureToken, ...], str, str]:
+) -> tuple[tuple[CaptureToken, ...], str, str, str, str]:
     import mlx
     import mlx.core as mx
     import mlx_lm
@@ -258,6 +316,7 @@ def _capture_examples_with_mlx(
     if mlx_lm_version != request.plan.capture.backend_version:
         raise ValueError("installed MLX-LM version does not match capture.backend_version")
     model, tokenizer = load(request.teacher_root)
+    inference_dtype, quantization = _verify_capture_runtime(request, model)
     verify_tokenizer_fingerprint(
         request.plan,
         tokenizer_root=request.tokenizer_root,
@@ -321,17 +380,17 @@ def _capture_examples_with_mlx(
         del model
         del tokenizer
         mx.clear_cache()
-    return tuple(captures), mlx_version, mlx_lm_version
+    return tuple(captures), mlx_version, mlx_lm_version, inference_dtype, quantization
 
 
 def _package_version(distribution: str, module: object) -> str:
+    module_version = getattr(module, "__version__", None)
+    if isinstance(module_version, str) and module_version:
+        return module_version
     try:
         return version(distribution)
     except PackageNotFoundError:
-        value = getattr(module, "__version__", None)
-        if not isinstance(value, str) or not value:
-            raise ValueError(f"cannot determine {distribution} version") from None
-        return value
+        raise ValueError(f"cannot determine {distribution} version") from None
 
 
 def _run_worker(request_path: Path) -> None:
@@ -341,10 +400,13 @@ def _run_worker(request_path: Path) -> None:
     try:
         verify_teacher_fingerprint(request.plan, teacher_root=request.teacher_root)
         examples = _load_bound_examples(request)
-        captures, mlx_version, mlx_lm_version = _capture_examples_with_mlx(
-            request,
-            examples,
-        )
+        (
+            captures,
+            mlx_version,
+            mlx_lm_version,
+            inference_dtype,
+            quantization,
+        ) = _capture_examples_with_mlx(request, examples)
         manifest = CaptureShardPublisher(
             root=request.publication_root,
             plan=request.plan,
@@ -364,6 +426,8 @@ def _run_worker(request_path: Path) -> None:
             token_count=manifest.token_count,
             mlx_version=mlx_version,
             mlx_lm_version=mlx_lm_version,
+            inference_dtype=inference_dtype,
+            quantization=quantization,
         )
         _atomic_write(
             _contained_path(worker_root, _WORKER_RECEIPT_NAME),
