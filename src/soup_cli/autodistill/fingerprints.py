@@ -75,6 +75,16 @@ def verify_tokenizer_fingerprint(
     template_digest = hashlib.sha256(chat_template.encode("utf-8")).hexdigest()
     if template_digest != plan.tokenizer.chat_template_sha256:
         raise ArtifactCorruptionError("tokenizer chat template sha256 mismatch")
+    verify_tokenizer_file_fingerprint(plan, tokenizer_root=tokenizer_root)
+
+
+def verify_tokenizer_file_fingerprint(
+    plan: AutoDistillPlan,
+    *,
+    tokenizer_root: str | os.PathLike[str],
+) -> None:
+    """Verify bound tokenizer bytes before a backend instantiates the tokenizer."""
+
     root = Path(tokenizer_root)
     for expected in plan.tokenizer.files:
         _verify_file(root, expected)

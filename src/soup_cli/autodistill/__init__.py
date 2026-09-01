@@ -19,6 +19,7 @@ from soup_cli.autodistill.fingerprints import (
     verified_dataset_bytes,
     verify_dataset_fingerprint,
     verify_teacher_fingerprint,
+    verify_tokenizer_file_fingerprint,
     verify_tokenizer_fingerprint,
 )
 from soup_cli.autodistill.publisher import CaptureShardPublisher
@@ -38,6 +39,7 @@ __all__ = [
     "capture_teacher_expert_trajectory",
     "verify_dataset_fingerprint",
     "verify_teacher_fingerprint",
+    "verify_tokenizer_file_fingerprint",
     "verify_tokenizer_fingerprint",
     "verified_dataset_bytes",
 ]

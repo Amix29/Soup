@@ -31,6 +31,7 @@ from soup_cli.autodistill.contract import (
 from soup_cli.autodistill.fingerprints import (
     verified_dataset_bytes,
     verify_teacher_fingerprint,
+    verify_tokenizer_file_fingerprint,
     verify_tokenizer_fingerprint,
 )
 from soup_cli.autodistill.publisher import CaptureShardPublisher
@@ -101,8 +102,6 @@ class MlxTeacherCaptureRequest(_FrozenModel):
     def _mlx_only(self) -> MlxTeacherCaptureRequest:
         if self.plan.capture.backend != "mlx":
             raise ValueError("MLX teacher worker requires capture.backend=mlx")
-        if os.path.realpath(self.teacher_root) != os.path.realpath(self.tokenizer_root):
-            raise ValueError("MLX B1 requires tokenizer_root to equal teacher_root")
         if self.example_end is not None and self.example_end <= self.example_start:
             raise ValueError("example_end must be greater than example_start")
         return self
@@ -124,6 +123,9 @@ class MlxTeacherWorkerReceipt(_FrozenModel):
     mlx_version: str = Field(min_length=1, max_length=128)
     mlx_lm_version: str = Field(min_length=1, max_length=128)
     inference_dtype: Literal["float16", "bfloat16", "float32"]
+    floating_parameter_dtypes: tuple[
+        Literal["float16", "bfloat16", "float32"], ...
+    ] = Field(min_length=1)
     quantization: str = Field(min_length=1, max_length=128)
 
 
@@ -285,38 +287,55 @@ def _floating_parameter_dtypes(parameters: object) -> set[str]:
     return observed
 
 
-def _verify_capture_runtime(request: MlxTeacherCaptureRequest, model: object) -> tuple[str, str]:
+def _verify_declared_quantization(request: MlxTeacherCaptureRequest) -> str:
     quantization = _quantization_descriptor(request.teacher_root)
     if quantization != request.plan.capture.quantization:
-        raise ValueError("loaded teacher quantization does not match capture.quantization")
+        raise ValueError("teacher config quantization does not match capture.quantization")
+    return quantization
+
+
+def _verify_capture_runtime_dtype(
+    request: MlxTeacherCaptureRequest,
+    model: object,
+    *,
+    quantization: str,
+) -> tuple[str, tuple[str, ...]]:
     parameters_method = getattr(model, "parameters", None)
     if not callable(parameters_method):
         raise ValueError("MLX teacher does not expose parameters for dtype verification")
     dtypes = _floating_parameter_dtypes(parameters_method())
     expected = request.plan.capture.dtype
-    if dtypes != {expected}:
+    allowed = {expected} if quantization == "none" else {expected, "float32"}
+    if expected not in dtypes or not dtypes <= allowed:
         rendered = ", ".join(sorted(dtypes)) or "none"
         raise ValueError(
             f"loaded teacher floating parameter dtypes ({rendered}) do not match {expected}"
         )
-    return expected, quantization
+    return expected, tuple(sorted(dtypes))
 
 
 def _capture_examples_with_mlx(
     request: MlxTeacherCaptureRequest,
     examples: tuple[TokenizedTeacherExample, ...],
-) -> tuple[tuple[CaptureToken, ...], str, str, str, str]:
+) -> tuple[tuple[CaptureToken, ...], str, str, str, tuple[str, ...], str]:
     import mlx
     import mlx.core as mx
     import mlx_lm
     from mlx_lm import load
+    from mlx_lm.utils import load_tokenizer
 
     mlx_version = _package_version("mlx", mlx)
     mlx_lm_version = _package_version("mlx-lm", mlx_lm)
     if mlx_lm_version != request.plan.capture.backend_version:
         raise ValueError("installed MLX-LM version does not match capture.backend_version")
-    model, tokenizer = load(request.teacher_root)
-    inference_dtype, quantization = _verify_capture_runtime(request, model)
+    quantization = _verify_declared_quantization(request)
+    model, teacher_tokenizer = load(request.teacher_root)
+    inference_dtype, floating_parameter_dtypes = _verify_capture_runtime_dtype(
+        request,
+        model,
+        quantization=quantization,
+    )
+    tokenizer = load_tokenizer(request.tokenizer_root)
     verify_tokenizer_fingerprint(
         request.plan,
         tokenizer_root=request.tokenizer_root,
@@ -379,8 +398,16 @@ def _capture_examples_with_mlx(
     finally:
         del model
         del tokenizer
+        del teacher_tokenizer
         mx.clear_cache()
-    return tuple(captures), mlx_version, mlx_lm_version, inference_dtype, quantization
+    return (
+        tuple(captures),
+        mlx_version,
+        mlx_lm_version,
+        inference_dtype,
+        floating_parameter_dtypes,
+        quantization,
+    )
 
 
 def _package_version(distribution: str, module: object) -> str:
@@ -399,12 +426,17 @@ def _run_worker(request_path: Path) -> None:
     worker_root = request_path.parent
     try:
         verify_teacher_fingerprint(request.plan, teacher_root=request.teacher_root)
+        verify_tokenizer_file_fingerprint(
+            request.plan,
+            tokenizer_root=request.tokenizer_root,
+        )
         examples = _load_bound_examples(request)
         (
             captures,
             mlx_version,
             mlx_lm_version,
             inference_dtype,
+            floating_parameter_dtypes,
             quantization,
         ) = _capture_examples_with_mlx(request, examples)
         manifest = CaptureShardPublisher(
@@ -427,6 +459,7 @@ def _run_worker(request_path: Path) -> None:
             mlx_version=mlx_version,
             mlx_lm_version=mlx_lm_version,
             inference_dtype=inference_dtype,
+            floating_parameter_dtypes=floating_parameter_dtypes,
             quantization=quantization,
         )
         _atomic_write(

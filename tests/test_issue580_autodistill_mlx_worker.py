@@ -18,6 +18,7 @@ from soup_cli.autodistill.contract import (
     CaptureToken,
     ShardManifest,
     build_plan_estimate,
+    canonical_json_bytes,
     canonicalize_jsonl_bytes,
 )
 from soup_cli.autodistill.mlx_worker import (
@@ -33,7 +34,12 @@ def _sha(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _write_fake_mlx_runtime(root: Path, *, mlx_lm_version: str = _MLX_VERSION) -> Path:
+def _write_fake_mlx_runtime(
+    root: Path,
+    *,
+    mlx_lm_version: str = _MLX_VERSION,
+    parameter_dtypes: tuple[str, ...] = ("float32",),
+) -> Path:
     fake_root = root / "fake-runtime"
     mlx_root = fake_root / "mlx"
     mlx_lm_root = fake_root / "mlx_lm"
@@ -64,6 +70,10 @@ def clear_cache():
     _trace("clear_cache")
 """,
         encoding="utf-8",
+    )
+    parameter_entries = ", ".join(
+        f'"weight_{index}": self._Parameter("mlx.core.{dtype}")'
+        for index, dtype in enumerate(parameter_dtypes)
     )
     (mlx_lm_root / "__init__.py").write_text(
         f'''import os
@@ -100,10 +110,11 @@ class _Logits:
 
 class _Model:
     class _Parameter:
-        dtype = "mlx.core.float32"
+        def __init__(self, dtype):
+            self.dtype = dtype
 
     def parameters(self):
-        return {{"weight": self._Parameter()}}
+        return {{{parameter_entries}}}
 
     def __call__(self, inputs):
         _trace("forward:" + str(len(inputs[0])))
@@ -113,6 +124,15 @@ def load(model_path):
     _trace("load:" + model_path)
     return _Model(), _Tokenizer()
 ''',
+        encoding="utf-8",
+    )
+    (mlx_lm_root / "utils.py").write_text(
+        """from . import _Tokenizer, _trace
+
+def load_tokenizer(model_path):
+    _trace("load-tokenizer:" + model_path)
+    return _Tokenizer()
+""",
         encoding="utf-8",
     )
     return fake_root
@@ -261,6 +281,7 @@ def test_real_child_process_captures_full_trajectory_and_exits(monkeypatch, tmp_
         (publication_root / ".workers/transaction-0001/worker-receipt.json").read_bytes()
     )
     assert receipt["inference_dtype"] == "float32"
+    assert receipt["floating_parameter_dtypes"] == ["float32"]
     assert receipt["quantization"] == "none"
     persisted = MlxTeacherCaptureResult.model_validate_json(
         (publication_root / ".workers/transaction-0001/result.json").read_bytes()
@@ -278,6 +299,7 @@ def test_real_child_process_captures_full_trajectory_and_exits(monkeypatch, tmp_
     assert [row.context_token_ids for row in rows] == [(1, 2), (1, 2, 3), (1, 2, 3, 4)]
     events = trace.read_text(encoding="utf-8").splitlines()
     assert events.count(f"load:{teacher_root}") == 1
+    assert events.count(f"load-tokenizer:{tokenizer_root}") == 1
     assert [event for event in events if event.startswith("forward:")] == ["forward:4"]
     assert events.count("astype:float32") == 3
     assert events.count("eval") == 3
@@ -342,6 +364,47 @@ def test_declared_runtime_identity_must_match_loaded_teacher(
         )
 
     assert not (publication_root / "shards/shard-0001").exists()
+
+
+def test_quantized_teacher_records_declared_dtype_and_float32_auxiliaries(
+    monkeypatch,
+    tmp_path,
+):
+    plan, teacher_root, tokenizer_root, dataset_root = _local_plan(tmp_path)
+    config = {"model_type": "fixture", "quantization": {"bits": 4, "group_size": 64}}
+    config_bytes = canonical_json_bytes(config) + b"\n"
+    (teacher_root / "config.json").write_bytes(config_bytes)
+    active = {"quantization": config["quantization"]}
+    quantization = f"config-sha256:{_sha(canonical_json_bytes(active))}"
+    payload = plan.model_dump(mode="json", by_alias=True)
+    payload["teacher"]["config_sha256"] = _sha(config_bytes)
+    payload["capture"].update({"dtype": "bfloat16", "quantization": quantization})
+    plan = AutoDistillPlan.model_validate(payload)
+    fake_root = _write_fake_mlx_runtime(
+        tmp_path,
+        parameter_dtypes=("bfloat16", "float32"),
+    )
+    _runtime_environment(monkeypatch, tmp_path, fake_root)
+    publication_root = tmp_path / "publication"
+
+    run_mlx_teacher_capture_process(
+        plan=plan,
+        teacher_root=teacher_root,
+        tokenizer_root=tokenizer_root,
+        dataset_root=dataset_root,
+        publication_root=publication_root,
+        shard_id="shard-0001",
+        transaction_id="transaction-0001",
+        python_executable=sys.executable,
+        timeout_seconds=30,
+    )
+
+    receipt = json.loads(
+        (publication_root / ".workers/transaction-0001/worker-receipt.json").read_bytes()
+    )
+    assert receipt["inference_dtype"] == "bfloat16"
+    assert receipt["floating_parameter_dtypes"] == ["bfloat16", "float32"]
+    assert receipt["quantization"] == quantization
 
 
 def test_declared_left_truncation_uses_one_forward_per_exact_context(monkeypatch, tmp_path):
@@ -463,6 +526,28 @@ def test_changed_bound_dataset_fails_before_model_load(monkeypatch, tmp_path):
     assert not trace.exists()
 
 
+def test_changed_bound_tokenizer_fails_before_model_load(monkeypatch, tmp_path):
+    plan, teacher_root, tokenizer_root, dataset_root = _local_plan(tmp_path)
+    fake_root = _write_fake_mlx_runtime(tmp_path)
+    trace = _runtime_environment(monkeypatch, tmp_path, fake_root)
+    (tokenizer_root / "tokenizer.json").write_bytes(b'{"changed":true}\n')
+
+    with pytest.raises(RuntimeError, match="byte count mismatch|sha256 mismatch"):
+        run_mlx_teacher_capture_process(
+            plan=plan,
+            teacher_root=teacher_root,
+            tokenizer_root=tokenizer_root,
+            dataset_root=dataset_root,
+            publication_root=tmp_path / "publication",
+            shard_id="shard-0001",
+            transaction_id="transaction-0001",
+            python_executable=sys.executable,
+            timeout_seconds=30,
+        )
+
+    assert not trace.exists()
+
+
 def test_non_mlx_plan_is_refused_before_worker_directory_is_created(tmp_path):
     plan, teacher_root, tokenizer_root, dataset_root = _local_plan(tmp_path)
     payload = plan.model_dump(mode="json", by_alias=True)
@@ -484,7 +569,7 @@ def test_non_mlx_plan_is_refused_before_worker_directory_is_created(tmp_path):
     assert not publication_root.exists()
 
 
-def test_worker_ids_and_tokenizer_root_fail_closed_before_spawn(tmp_path):
+def test_worker_ids_fail_closed_before_spawn(tmp_path):
     plan, teacher_root, tokenizer_root, dataset_root = _local_plan(tmp_path)
     publication_root = tmp_path / "publication"
     with pytest.raises(ValidationError, match="transaction_id"):
@@ -497,17 +582,32 @@ def test_worker_ids_and_tokenizer_root_fail_closed_before_spawn(tmp_path):
             shard_id="shard-0001",
             transaction_id="../escape",
         )
-    other_tokenizer = tmp_path / "other-tokenizer"
-    other_tokenizer.mkdir()
-    with pytest.raises(ValidationError, match="tokenizer_root to equal teacher_root"):
-        run_mlx_teacher_capture_process(
-            plan=plan,
-            teacher_root=teacher_root,
-            tokenizer_root=other_tokenizer,
-            dataset_root=dataset_root,
-            publication_root=publication_root,
-            shard_id="shard-0001",
-            transaction_id="transaction-0001",
-        )
-
     assert not publication_root.exists()
+
+
+def test_canonical_tokenizer_can_be_loaded_from_a_separate_root(monkeypatch, tmp_path):
+    plan, teacher_root, tokenizer_root, dataset_root = _local_plan(tmp_path)
+    canonical_root = tmp_path / "canonical-tokenizer"
+    canonical_root.mkdir()
+    (canonical_root / "tokenizer.json").write_bytes(
+        (tokenizer_root / "tokenizer.json").read_bytes()
+    )
+    fake_root = _write_fake_mlx_runtime(tmp_path)
+    trace = _runtime_environment(monkeypatch, tmp_path, fake_root)
+
+    result = run_mlx_teacher_capture_process(
+        plan=plan,
+        teacher_root=teacher_root,
+        tokenizer_root=canonical_root,
+        dataset_root=dataset_root,
+        publication_root=tmp_path / "publication",
+        shard_id="shard-0001",
+        transaction_id="transaction-0001",
+        python_executable=sys.executable,
+        timeout_seconds=30,
+    )
+
+    assert result.student_loaded is False
+    events = trace.read_text(encoding="utf-8").splitlines()
+    assert events.count(f"load:{teacher_root}") == 1
+    assert events.count(f"load-tokenizer:{canonical_root}") == 1

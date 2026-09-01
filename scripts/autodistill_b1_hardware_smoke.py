@@ -51,6 +51,12 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--output-root", required=True)
     parser.add_argument("--revision", required=True)
     parser.add_argument("--model-id", default="HuggingFaceTB/SmolLM2-135M-Instruct")
+    parser.add_argument("--student-root")
+    parser.add_argument("--student-id")
+    parser.add_argument("--student-revision")
+    parser.add_argument("--tokenizer-root")
+    parser.add_argument("--tokenizer-id")
+    parser.add_argument("--tokenizer-revision")
     parser.add_argument("--prompt", default="The capital of France is")
     parser.add_argument("--target", default=" Paris.")
     parser.add_argument("--top-k", type=int, default=8)
@@ -60,6 +66,12 @@ def _arguments() -> argparse.Namespace:
 def main() -> int:
     arguments = _arguments()
     model_root = Path(os.path.realpath(arguments.model_root))
+    student_root = Path(os.path.realpath(arguments.student_root or model_root))
+    tokenizer_root = Path(os.path.realpath(arguments.tokenizer_root or student_root))
+    student_id = arguments.student_id or arguments.model_id
+    student_revision = arguments.student_revision or arguments.revision
+    tokenizer_id = arguments.tokenizer_id or student_id
+    tokenizer_revision = arguments.tokenizer_revision or student_revision
     output_root = Path(os.path.realpath(arguments.output_root))
     if output_root.exists():
         raise FileExistsError("output root must not already exist")
@@ -73,13 +85,15 @@ def main() -> int:
     config = json.loads(config_bytes)
     if not isinstance(config, dict):
         raise ValueError("config.json must contain an object")
-    dtype = str(config.get("torch_dtype", "")).removeprefix("torch.")
+    dtype = str(config.get("dtype") or config.get("torch_dtype") or "").removeprefix(
+        "torch."
+    )
     if dtype not in {"float16", "bfloat16", "float32"}:
         raise ValueError("checkpoint torch_dtype is not supported by the B1 plan")
 
     from transformers import AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(model_root, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_root, local_files_only=True)
     prompt_ids = tuple(tokenizer.encode(arguments.prompt, add_special_tokens=False))
     full_ids = tuple(
         tokenizer.encode(arguments.prompt + arguments.target, add_special_tokens=False)
@@ -99,37 +113,48 @@ def main() -> int:
     dataset_path = dataset_root / "prompts.jsonl"
     dataset_path.write_bytes(dataset_bytes)
 
-    weight_paths = sorted(model_root.glob("*.safetensors"))
-    if not weight_paths:
-        raise ValueError("checkpoint has no root-level safetensors weights")
     tokenizer_names = (
+        "added_tokens.json",
+        "chat_template.jinja",
+        "config.json",
         "merges.txt",
         "special_tokens_map.json",
+        "tokenizer.model",
         "tokenizer.json",
         "tokenizer_config.json",
         "vocab.json",
     )
     tokenizer_paths = [
-        model_root / name for name in tokenizer_names if (model_root / name).is_file()
+        tokenizer_root / name
+        for name in tokenizer_names
+        if (tokenizer_root / name).is_file()
     ]
     if not tokenizer_paths:
         raise ValueError("checkpoint has no recognized tokenizer files")
-    teacher = {
-        "model_id": arguments.model_id,
-        "revision": arguments.revision,
-        "config_sha256": hashlib.sha256(config_bytes).hexdigest(),
-        "weights": [
-            item.model_dump(mode="json")
-            for item in (_digest(path, model_root) for path in weight_paths)
-        ],
-    }
+    def model_fingerprint(root: Path, model_id: str, revision: str) -> dict[str, object]:
+        root_config = (root / "config.json").read_bytes()
+        root_weights = sorted(root.glob("*.safetensors"))
+        if not root_weights:
+            raise ValueError(f"checkpoint {model_id!r} has no root-level safetensors weights")
+        return {
+            "model_id": model_id,
+            "revision": revision,
+            "config_sha256": hashlib.sha256(root_config).hexdigest(),
+            "weights": [
+                item.model_dump(mode="json")
+                for item in (_digest(path, root) for path in root_weights)
+            ],
+        }
+
+    teacher = model_fingerprint(model_root, arguments.model_id, arguments.revision)
+    student = model_fingerprint(student_root, student_id, student_revision)
     tokenizer_fingerprint = {
-        "tokenizer_id": arguments.model_id,
-        "revision": arguments.revision,
-        "vocab_size": int(config["vocab_size"]),
+        "tokenizer_id": tokenizer_id,
+        "revision": tokenizer_revision,
+        "vocab_size": len(tokenizer.get_vocab()),
         "files": [
             item.model_dump(mode="json")
-            for item in (_digest(path, model_root) for path in tokenizer_paths)
+            for item in (_digest(path, tokenizer_root) for path in tokenizer_paths)
         ],
         "chat_template_sha256": hashlib.sha256(
             (tokenizer.chat_template or "").encode("utf-8")
@@ -138,7 +163,7 @@ def main() -> int:
     }
     estimate = build_plan_estimate(
         token_count=len(target_ids),
-        vocab_size=int(config["vocab_size"]),
+        vocab_size=len(tokenizer.get_vocab()),
         top_k=arguments.top_k,
         max_forced_tokens_per_position=2,
         token_id_bytes=4,
@@ -152,7 +177,7 @@ def main() -> int:
             "run_id": "mlx-hardware-smoke-1",
             "capture_boundary": "same_tokenizer",
             "teacher": teacher,
-            "student": teacher,
+            "student": student,
             "tokenizer": tokenizer_fingerprint,
             "dataset": {
                 "normalization": "soup-jsonl-c14n-v1",
@@ -164,7 +189,7 @@ def main() -> int:
             },
             "capture": {
                 "planned_token_count": len(target_ids),
-                "vocab_size": int(config["vocab_size"]),
+                "vocab_size": len(tokenizer.get_vocab()),
                 "max_forced_tokens_per_position": 2,
                 "backend": "mlx",
                 "backend_version": version("mlx-lm"),
@@ -201,7 +226,7 @@ def main() -> int:
     result = run_mlx_teacher_capture_process(
         plan=plan,
         teacher_root=model_root,
-        tokenizer_root=model_root,
+        tokenizer_root=tokenizer_root,
         dataset_root=dataset_root,
         publication_root=publication_root,
         shard_id="shard-0001",

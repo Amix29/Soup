@@ -243,17 +243,22 @@ root. The controller writes its final receipt only after that child has exited s
 the exact `available` manifest has been reopened. The plan still contains the immutable student
 fingerprint as future-consumer metadata; it is never resolved or loaded during capture.
 
-For this boundary, MLX-LM loads both model and tokenizer from the same local checkpoint root.
-`capture.backend_version` is the exact installed `mlx-lm` distribution version and the tokenizer
-renderer is `mlx-lm@<version>`. Both must match the plan before publication. MLX/MLX-LM remain
-lazy imports inside the worker.
+For this boundary, MLX-LM loads the teacher model from its immutable local checkpoint root and
+loads the canonical shared tokenizer separately from a tokenizer-only root. That tokenizer root
+may be derived from the student's tokenizer bytes, but it contains no student weights and the
+worker never resolves a student model. `capture.backend_version` is the exact installed `mlx-lm`
+distribution version and the tokenizer renderer is `mlx-lm@<version>`. Both must match the plan
+before publication. MLX/MLX-LM remain lazy imports inside the worker.
 
-The worker also verifies the loaded floating-parameter dtype against `capture.dtype`. An
-unquantized checkpoint uses the literal quantization identity `none`. If `config.json` contains
+The worker also verifies the loaded floating-parameter dtypes against `capture.dtype`. An
+unquantized checkpoint must expose exactly that dtype and uses the literal quantization identity
+`none`. A quantized checkpoint must expose the declared base dtype; float32 auxiliary parameters
+are allowed, while any other undeclared floating dtype fails closed. If `config.json` contains
 `quantization` or `quantization_config`, its identity is
 `config-sha256:<sha256(canonical JSON of those active fields)>`. This binds the plan to the exact
 quantization recipe without pretending that names such as `4-bit` uniquely identify a runtime.
-The observed dtype and quantization identity are repeated in the child receipt.
+The declared inference dtype, all observed floating-parameter dtypes, and the quantization
+identity are repeated in the child receipt.
 
 The bound dataset is canonical JSONL with versioned, already-tokenized rows:
 
