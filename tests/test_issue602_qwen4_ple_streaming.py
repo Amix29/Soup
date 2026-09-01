@@ -903,16 +903,12 @@ def test_external_tensor_bytes_reports_oq_packed_storage():
 def test_qwen4_oq_torch_floor_matches_project_and_doctor():
     from pathlib import Path
 
-    import tomllib
-
     from soup_cli.commands.doctor import DEPS
 
     root = Path(__file__).parents[1]
-    with (root / "pyproject.toml").open("rb") as handle:
-        project = tomllib.load(handle)
-    train = project["project"]["optional-dependencies"]["train"]
+    project = (root / "pyproject.toml").read_text(encoding="utf-8")
 
-    assert "torch>=2.3.0" in train
+    assert '"torch>=2.3.0"' in project
     assert next(item for item in DEPS if item[0] == "torch")[2] == "2.3.0"
 
 
