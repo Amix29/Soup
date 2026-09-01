@@ -679,6 +679,26 @@ def _source_file_components(shards: List[str]) -> Tuple[Tuple[str, int, int], ..
     return tuple(components)
 
 
+def checkpoint_source_components(
+    weights_dir: str,
+    components: Tuple[Tuple[str, int, int], ...],
+    *,
+    include_config: bool,
+) -> Tuple[Tuple[str, int, int], ...]:
+    """Add numerical sidecar metadata to the cache identity when applicable."""
+    merged = {name: (name, size, mtime) for name, size, mtime in components}
+    if include_config:
+        config_path = os.path.join(os.path.realpath(weights_dir), "config.json")
+        if os.path.isfile(config_path) and not os.path.islink(config_path):
+            stat = os.stat(config_path)
+            merged["config.json"] = (
+                "config.json",
+                int(stat.st_size),
+                int(stat.st_mtime_ns),
+            )
+    return tuple(merged[name] for name in sorted(merged))
+
+
 def _fingerprint_components(components: Tuple[Tuple[str, int, int], ...]) -> str:
     """Hash the exact components that are persisted in ``index.json``."""
     import hashlib
@@ -1009,7 +1029,11 @@ def shard_checkpoint(
     external_mode = "qwen4_ple" if arch == "qwen4_exp" else ""
     shards = _discover_safetensors(weights_dir)
     resolved_out = _validate_out_dir(out_dir)
-    source_files = _source_file_components(shards)
+    source_files = checkpoint_source_components(
+        weights_dir,
+        _source_file_components(shards),
+        include_config=bool(external_mode),
+    )
     fingerprint = _fingerprint_components(source_files)
     if not force:
         cached, miss_reason = inspect_shard_cache(
@@ -1039,7 +1063,7 @@ def shard_checkpoint(
     for path in shards:
         with safe_open(path, framework="pt") as handle:
             for source_key in handle.keys():
-                if source_key.endswith((".biases", ".scales")):
+                if external_mode and source_key.endswith((".biases", ".scales")):
                     saw_oq_companion = True
                 key = _canonical_stream_key(source_key)
                 prior = where.get(key)

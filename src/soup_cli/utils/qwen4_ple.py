@@ -579,7 +579,7 @@ def _disk_embedding(reader: SafeTensorRowReader):
             self.reader = reader
 
         def forward(self, input_ids):
-            return self.reader.gather(input_ids)
+            return self.reader.gather(input_ids).to(self.weight.device)
 
     return DiskBackedEmbedding()
 
@@ -627,5 +627,8 @@ def install_qwen4_ple_embeddings(
 
 
 def external_tensor_bytes(external_tensors: Mapping[str, Any]) -> int:
-    """Exact resident/disk bytes represented by the PLE descriptors."""
-    return sum(int(spec.nbytes) for spec in external_tensors.values())
+    """Exact bytes actually resident or mapped for the PLE descriptors."""
+    return sum(
+        int(getattr(spec, "storage_nbytes", spec.nbytes))
+        for spec in external_tensors.values()
+    )

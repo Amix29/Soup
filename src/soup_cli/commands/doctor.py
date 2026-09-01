@@ -16,7 +16,7 @@ console = Console()
 
 # Dependencies to check: (import_name, package_name, min_version, required)
 DEPS = [
-    ("torch", "torch", "2.0.0", True),
+    ("torch", "torch", "2.3.0", True),
     ("transformers", "transformers", "5.16.1", True),
     ("peft", "peft", "0.20.0", True),
     ("trl", "trl", "0.29.0", True),

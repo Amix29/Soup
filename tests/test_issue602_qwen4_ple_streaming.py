@@ -582,3 +582,348 @@ def test_external_ple_descriptor_reapplies_a_production_sized_element_cap():
 
     with pytest.raises(ValueError, match="element cap"):
         ExternalTensorSpec(parts=(oversized,), shape=oversized.shape, dtype="F32")
+
+
+def test_qwen4_ngram_policy_covers_oq_ram_and_auto_defaults():
+    from soup_cli.trainer.stream_setup import _resolve_qwen4_ngram_source
+
+    common = {
+        "store_total": 20,
+        "ngram_bytes": 30,
+        "free_ram": 100,
+        "stream_source": "auto",
+    }
+    with pytest.raises(ValueError, match="oQ PLE embeddings require"):
+        _resolve_qwen4_ngram_source(oq_ngram=True, requested="ram", **common)
+    assert (
+        _resolve_qwen4_ngram_source(
+            oq_ngram=True, requested="auto", **common
+        )
+        == "disk"
+    )
+    assert (
+        _resolve_qwen4_ngram_source(
+            oq_ngram=False, requested="auto", **common
+        )
+        == "ram"
+    )
+    assert (
+        _resolve_qwen4_ngram_source(
+            oq_ngram=False,
+            requested="auto",
+            **{**common, "ngram_bytes": 70},
+        )
+        == "disk"
+    )
+
+
+def test_qwen4_ram_ple_refusal_is_independent_of_base_stream_source():
+    from soup_cli.trainer.stream_setup import _validate_qwen4_ngram_ram_fit
+
+    with pytest.raises(ValueError, match="stream_ngram_source='ram'"):
+        _validate_qwen4_ngram_ram_fit(
+            stream_source="auto",
+            ngram_source="ram",
+            required_ram=81,
+            free_ram=100,
+        )
+    _validate_qwen4_ngram_ram_fit(
+        stream_source="auto",
+        ngram_source="disk",
+        required_ram=10_000,
+        free_ram=100,
+    )
+    with pytest.raises(ValueError, match="stream_source='ram'"):
+        _validate_qwen4_ngram_ram_fit(
+            stream_source="ram",
+            ngram_source="disk",
+            required_ram=81,
+            free_ram=100,
+        )
+
+
+def test_setup_reaches_every_qwen4_fail_closed_policy(tmp_path, monkeypatch):
+    import types
+
+    import soup_cli.trainer.stream_setup as stream_setup
+
+    class _Wrapper(stream_setup.StreamingSetupMixin):
+        def __init__(self):
+            self.device = "cpu"
+            self._trust_remote_code = False
+
+        def _stream_budget_lines(self, *_args, **_kwargs):
+            return (), None
+
+    cfg = types.SimpleNamespace(
+        base="qwen4-test",
+        task="sft",
+        data=types.SimpleNamespace(max_length=8),
+    )
+    tcfg = types.SimpleNamespace(
+        quantization="none",
+        double_quant_on=True,
+        stream_source="auto",
+        stream_ngram_source="auto",
+        stream_buffers=2,
+        stream_disk_kind=None,
+        stream_pin=None,
+        seed=7,
+        moe_lora=False,
+        batch_size=1,
+        gradient_accumulation_steps=1,
+        lora=types.SimpleNamespace(
+            r=2,
+            alpha=4,
+            dropout=0.0,
+            target_modules=["q_proj"],
+            use_dora=False,
+            use_rslora=False,
+        ),
+    )
+    model_cfg = types.SimpleNamespace(
+        model_type="qwen4_exp",
+        text_config=types.SimpleNamespace(
+            hidden_size=4,
+            num_hidden_layers=1,
+            vocab_size=8,
+            intermediate_size=8,
+        ),
+    )
+    external = types.SimpleNamespace(bits=4, nbytes=1_024, storage_nbytes=256)
+    index = types.SimpleNamespace(
+        n_layers=1,
+        total_params=4,
+        quant="none",
+        quant_specs={},
+        external_tensors={"model.layers.0.ple.weight": external},
+    )
+    layer_specs = [{"self_attn.q_proj.weight": ((2, 2), "float32")}]
+    plan = types.SimpleNamespace(
+        tier="ram", store_bytes=16, large_store_bytes=0, pinned=False, notes=()
+    )
+    runtime = types.SimpleNamespace(
+        stats=lambda: {
+            "tier": "ram",
+            "store_bytes": 16,
+            "pinned": False,
+            "n_layers": 1,
+            "buffers": 2,
+            "buffer_bytes": 8,
+            "large_buffer_bytes": 0,
+        }
+    )
+    tokenizer = types.SimpleNamespace(pad_token=None, eos_token="</s>")
+
+    monkeypatch.setattr(
+        "transformers.AutoTokenizer.from_pretrained", lambda *_a, **_k: tokenizer
+    )
+    monkeypatch.setattr(
+        "transformers.AutoConfig.from_pretrained", lambda *_a, **_k: model_cfg
+    )
+    monkeypatch.setattr("peft.LoraConfig", lambda **kwargs: types.SimpleNamespace(**kwargs))
+    monkeypatch.setattr(
+        "soup_cli.utils.layer_stream.stream_arch_of", lambda *_a, **_k: "qwen4_exp"
+    )
+    monkeypatch.setattr(
+        "soup_cli.utils.layer_shard.resolve_shard_dir",
+        lambda *_a, **_k: str(tmp_path / "shards"),
+    )
+    monkeypatch.setattr(
+        "soup_cli.utils.layer_shard.shard_checkpoint", lambda *_a, **_k: index
+    )
+    monkeypatch.setattr(
+        "soup_cli.utils.layer_shard.source_weight_bytes", lambda *_a, **_k: 1_024
+    )
+    monkeypatch.setattr(
+        "soup_cli.utils.spectrum_scan.resolve_model_weights",
+        lambda *_a, **_k: str(tmp_path / "weights"),
+    )
+    monkeypatch.setattr(
+        "soup_cli.utils.layer_stream.free_ram_bytes", lambda: 1_000_000
+    )
+    monkeypatch.setattr(
+        "soup_cli.utils.layer_stream_runtime.RamSource.layer_specs_from_shards",
+        lambda *_a, **_k: layer_specs,
+    )
+    monkeypatch.setattr(
+        "soup_cli.utils.layer_stream_runtime.extras_resident_bytes",
+        lambda *_a, **_k: 0,
+    )
+    monkeypatch.setattr(
+        "soup_cli.utils.layer_stream_runtime.large_layer_store_bytes",
+        lambda *_a, **_k: 0,
+    )
+    monkeypatch.setattr(
+        "soup_cli.utils.layer_stream_runtime.large_layer_buffer_bytes",
+        lambda *_a, **_k: 0,
+    )
+    monkeypatch.setattr(
+        "soup_cli.utils.layer_stream.build_stream_plan", lambda **_kwargs: plan
+    )
+    monkeypatch.setattr(
+        "soup_cli.utils.layer_stream.resolve_disk_kind",
+        lambda *_a, **_k: types.SimpleNamespace(kind="ssd"),
+    )
+    monkeypatch.setattr(
+        "soup_cli.utils.layer_stream.render_stream_panel", lambda *_a, **_k: "panel"
+    )
+    monkeypatch.setattr(
+        "soup_cli.utils.peft_wiring.resolve_lora_target_modules",
+        lambda *_a, **_k: ["q_proj"],
+    )
+    monkeypatch.setattr(
+        "soup_cli.utils.layer_stream_runtime.build_streamed_model",
+        lambda **_kwargs: (types.SimpleNamespace(), runtime),
+    )
+
+    reached = []
+
+    def _mode(**_kwargs):
+        reached.append("mode")
+
+    def _source(**_kwargs):
+        reached.append("source")
+        return "disk"
+
+    def _disk(**_kwargs):
+        reached.append("disk")
+
+    def _ram(**_kwargs):
+        reached.append("ram")
+
+    monkeypatch.setattr(stream_setup, "_validate_qwen4_streaming_mode", _mode)
+    monkeypatch.setattr(stream_setup, "_resolve_qwen4_ngram_source", _source)
+    monkeypatch.setattr(stream_setup, "_validate_qwen4_ngram_disk", _disk)
+    monkeypatch.setattr(stream_setup, "_validate_qwen4_ngram_ram_fit", _ram)
+
+    _Wrapper()._setup_streaming_transformers(cfg, tcfg)
+
+    assert reached == ["mode", "source", "disk", "ram"]
+
+
+def test_non_qwen_companion_suffixes_do_not_enable_oq(tmp_path):
+    import torch
+    from safetensors.torch import save_file
+
+    from soup_cli.utils.layer_shard import shard_checkpoint
+
+    weights = tmp_path / "weights"
+    weights.mkdir()
+    save_file(
+        {
+            "model.layers.0.proj.weight": torch.ones(2, 2),
+            "model.layers.0.proj.scales": torch.ones(2, 1),
+            "model.layers.0.proj.biases": torch.zeros(2, 1),
+            "model.norm.weight": torch.ones(2),
+        },
+        weights / "model.safetensors",
+    )
+
+    index = shard_checkpoint(str(weights), str(tmp_path / "shards"), dtype="float32")
+
+    assert index.layer_keys == ("proj.biases", "proj.scales", "proj.weight")
+
+
+def test_qwen4_config_json_change_invalidates_oq_cache(tmp_path):
+    import torch
+    from safetensors.torch import save_file
+
+    from soup_cli.utils.layer_shard import shard_checkpoint
+
+    weights = tmp_path / "weights"
+    shards = tmp_path / "shards"
+    weights.mkdir()
+    save_file(
+        {
+            "language_model.model.layers.0.proj.weight": torch.tensor(
+                [[0, 1, 2, 3]], dtype=torch.uint32
+            ),
+            "language_model.model.layers.0.proj.scales": torch.ones(
+                (1, 1), dtype=torch.bfloat16
+            ),
+            "language_model.model.layers.0.proj.biases": torch.zeros(
+                (1, 1), dtype=torch.bfloat16
+            ),
+            "language_model.model.norm.weight": torch.ones(2),
+        },
+        weights / "model.safetensors",
+    )
+    config = {
+        "quantization_config": {"bits": 4, "group_size": 32, "mode": "affine"}
+    }
+    config_path = weights / "config.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    first = shard_checkpoint(
+        str(weights), str(shards), dtype="float32", arch="qwen4_exp"
+    )
+
+    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    notices = []
+    second = shard_checkpoint(
+        str(weights),
+        str(shards),
+        dtype="float32",
+        arch="qwen4_exp",
+        notify=notices.append,
+    )
+
+    assert first.source_fingerprint != second.source_fingerprint
+    assert any(name == "config.json" for name, _size, _mtime in second.source_files)
+    assert any("config.json" in notice for notice in notices)
+
+
+def test_disk_embedding_returns_rows_on_registered_weight_device():
+    import torch
+
+    from soup_cli.utils.qwen4_ple import _disk_embedding
+
+    class _Reader:
+        dtype = "float32"
+        shape = (4, 3)
+
+        def gather(self, row_ids):
+            return torch.ones((*row_ids.shape, self.shape[1]))
+
+    embedding = _disk_embedding(_Reader()).to("meta")
+    actual = embedding(torch.tensor([0, 1]))
+
+    assert actual.device.type == "meta"
+
+
+def test_external_tensor_bytes_reports_oq_packed_storage():
+    from types import SimpleNamespace
+
+    from soup_cli.utils.qwen4_ple import external_tensor_bytes
+
+    spec = SimpleNamespace(nbytes=1_024, storage_nbytes=256)
+    assert external_tensor_bytes({"ple.weight": spec}) == 256
+
+
+def test_qwen4_oq_torch_floor_matches_project_and_doctor():
+    from pathlib import Path
+
+    import tomllib
+
+    from soup_cli.commands.doctor import DEPS
+
+    root = Path(__file__).parents[1]
+    with (root / "pyproject.toml").open("rb") as handle:
+        project = tomllib.load(handle)
+    train = project["project"]["optional-dependencies"]["train"]
+
+    assert "torch>=2.3.0" in train
+    assert next(item for item in DEPS if item[0] == "torch")[2] == "2.3.0"
+
+
+def test_qwen4_gate_record_and_changelog_are_discoverable_and_credited():
+    from pathlib import Path
+
+    root = Path(__file__).parents[1]
+    benchmark_index = (root / "benchmarks" / "README.md").read_text(encoding="utf-8")
+    changelog = (root / "changelog.d" / "0.73.3" / "603.added.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "gate-qwen4-ple-m4-max.md" in benchmark_index
+    assert "(#602 by @Amix29 in #603)" in changelog

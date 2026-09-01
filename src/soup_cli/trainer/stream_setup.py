@@ -66,6 +66,67 @@ def _validate_qwen4_ngram_disk(*, disk_kind: str, weights_dir: str) -> None:
     )
 
 
+def _resolve_qwen4_ngram_source(
+    *,
+    oq_ngram: bool,
+    requested: str,
+    store_total: int,
+    ngram_bytes: int,
+    free_ram: int,
+    stream_source: str,
+) -> str:
+    """Resolve Qwen4 PLE storage and refuse unsupported oQ materialisation."""
+    from soup_cli.utils.layer_stream import RAM_TIER_HEADROOM
+
+    if oq_ngram:
+        if requested == "ram":
+            raise ValueError(
+                "oQ PLE embeddings require "
+                "training.stream_ngram_source='disk' (or 'auto'): the packed "
+                "source stays read-only and only requested rows are dequantized."
+            )
+        return "disk"
+    if requested != "auto":
+        return requested
+    ram_budget = free_ram * RAM_TIER_HEADROOM
+    base_in_ram = (
+        store_total
+        if stream_source != "disk" and store_total < ram_budget
+        else 0
+    )
+    return "ram" if base_in_ram + ngram_bytes < ram_budget else "disk"
+
+
+def _validate_qwen4_ngram_ram_fit(
+    *,
+    stream_source: str,
+    ngram_source: str,
+    required_ram: int,
+    free_ram: int,
+) -> None:
+    """Refuse a RAM base or PLE before either source allocates its store."""
+    from soup_cli.utils.layer_stream import RAM_TIER_HEADROOM
+
+    ram_required = stream_source == "ram" or ngram_source == "ram"
+    if ram_required and required_ram >= free_ram * RAM_TIER_HEADROOM:
+        policy = (
+            "training.stream_ngram_source='ram'"
+            if ngram_source == "ram"
+            else "training.stream_source='ram'"
+        )
+        fallback = (
+            "stream_ngram_source='auto' to use read-only SSD streaming"
+            if ngram_source == "ram"
+            else "stream_source='auto' to allow the disk tier"
+        )
+        raise ValueError(
+            f"{policy} but the base plus selected PLE "
+            f"storage needs {required_ram / 1e9:.1f} GB and only "
+            f"{free_ram / 1e9:.1f} GB of RAM is free. Set {fallback}, free RAM, "
+            "or pick a smaller base."
+        )
+
+
 def _warn_if_ngram_source_unused(
     *, arch: str, requested: str, ngram_bytes: int, notify
 ) -> None:
@@ -327,6 +388,7 @@ class StreamingSetupMixin:
         from soup_cli.utils.layer_shard import (
             QUANT_NF4,
             QUANT_NONE,
+            checkpoint_source_components,
             estimate_oq_stream_cache_bytes,
             fingerprint_source_files,
             inspect_shard_cache,
@@ -416,11 +478,16 @@ class StreamingSetupMixin:
                 shard_estimate = oq_shard_estimate
             cached = None
             if not weights_plan.needs_materialization:
+                source_components = checkpoint_source_components(
+                    weights_plan.weights_dir,
+                    weights_plan.source_files,
+                    include_config=arch == "qwen4_exp",
+                )
                 cached, _reason = inspect_shard_cache(
                     shard_dir,
                     dtype,
-                    fingerprint_source_files(weights_plan.source_files),
-                    weights_plan.source_files,
+                    fingerprint_source_files(source_components),
+                    source_components,
                     quant,
                     double_quant,
                     quant_device_kind,
@@ -559,26 +626,14 @@ class StreamingSetupMixin:
             oq_ngram = any(
                 hasattr(spec, "bits") for spec in index.external_tensors.values()
             )
-            if oq_ngram and requested_ngram == "ram":
-                raise ValueError(
-                    "oQ PLE embeddings require "
-                    "training.stream_ngram_source='disk' (or 'auto'): the packed "
-                    "source stays read-only and only requested rows are dequantized."
-                )
-            if oq_ngram:
-                ngram_source = "disk"
-            elif requested_ngram == "auto":
-                ram_budget = free_ram * RAM_TIER_HEADROOM
-                base_in_ram = (
-                    store_total
-                    if tcfg.stream_source != "disk" and store_total < ram_budget
-                    else 0
-                )
-                ngram_source = (
-                    "ram" if base_in_ram + ngram_bytes < ram_budget else "disk"
-                )
-            else:
-                ngram_source = requested_ngram
+            ngram_source = _resolve_qwen4_ngram_source(
+                oq_ngram=oq_ngram,
+                requested=requested_ngram,
+                store_total=store_total,
+                ngram_bytes=ngram_bytes,
+                free_ram=free_ram,
+                stream_source=tcfg.stream_source,
+            )
             storage = "CPU RAM"
             if ngram_source == "disk":
                 ngram_disk = resolve_disk_kind(
@@ -604,14 +659,12 @@ class StreamingSetupMixin:
         # "needs NVMe or more RAM" — and without paying the ~9 s disk probe for
         # an answer that cannot change the outcome.
         required_ram = store_total + (ngram_bytes if ngram_source == "ram" else 0)
-        if tcfg.stream_source == "ram" and required_ram >= free_ram * RAM_TIER_HEADROOM:
-            raise ValueError(
-                f"training.stream_source='ram' but the base is "
-                f"{required_ram / 1e9:.1f} GB including its selected PLE "
-                f"storage and only {free_ram / 1e9:.1f} GB of "
-                f"RAM is free. Set stream_source='auto' to fall back to the NVMe "
-                f"disk tier, free RAM, or pick a smaller base."
-            )
+        _validate_qwen4_ngram_ram_fit(
+            stream_source=tcfg.stream_source,
+            ngram_source=ngram_source,
+            required_ram=required_ram,
+            free_ram=free_ram,
+        )
         plan_free_ram = free_ram
         if ngram_source == "ram":
             plan_free_ram = max(
