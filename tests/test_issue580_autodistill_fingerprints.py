@@ -99,6 +99,50 @@ def test_teacher_fingerprint_fails_closed_after_one_changed_byte(tmp_path):
         verify_teacher_fingerprint(plan, teacher_root=teacher_root)
 
 
+def test_teacher_weight_hashing_uses_bounded_streaming_reads(tmp_path, monkeypatch):
+    import soup_cli.autodistill.fingerprints as fingerprints
+
+    plan, teacher_root, _, _, _ = _local_plan(tmp_path)
+    weights_path = teacher_root / "model.safetensors"
+    original_open = Path.open
+    original_read_bytes = Path.read_bytes
+    read_sizes: list[int] = []
+
+    class BoundedReader:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return self.handle.__exit__(exc_type, exc_value, traceback)
+
+        def read(self, size=-1):
+            read_sizes.append(size)
+            return self.handle.read(size)
+
+    def guarded_open(path, *args, **kwargs):
+        handle = original_open(path, *args, **kwargs)
+        if path == weights_path and args and args[0] == "rb":
+            return BoundedReader(handle)
+        return handle
+
+    def guarded_read_bytes(path):
+        if path == weights_path:
+            raise AssertionError("weight shards must not use Path.read_bytes()")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(fingerprints, "_HASH_CHUNK_BYTES", 4)
+    monkeypatch.setattr(Path, "open", guarded_open)
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+
+    verify_teacher_fingerprint(plan, teacher_root=teacher_root)
+
+    assert len(read_sizes) > 1
+    assert set(read_sizes) == {4}
+
+
 def test_tokenizer_requires_exact_files_template_and_renderer(tmp_path):
     plan, _, tokenizer_root, _, template = _local_plan(tmp_path)
     with pytest.raises(ArtifactCorruptionError, match="chat template"):

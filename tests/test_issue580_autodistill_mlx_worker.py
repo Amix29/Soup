@@ -306,6 +306,46 @@ def test_real_child_process_captures_full_trajectory_and_exits(monkeypatch, tmp_
     assert events[-1] == "clear_cache"
 
 
+def test_controller_rejects_available_manifest_not_bound_to_worker_receipt(
+    monkeypatch,
+    tmp_path,
+):
+    import soup_cli.autodistill.mlx_worker as worker_module
+
+    plan, teacher_root, tokenizer_root, dataset_root = _local_plan(tmp_path)
+    fake_root = _write_fake_mlx_runtime(tmp_path)
+    _runtime_environment(monkeypatch, tmp_path, fake_root)
+    publication_root = tmp_path / "publication"
+    original_read_control = worker_module._read_control
+
+    def tamper_after_receipt(path, model_type):
+        receipt = original_read_control(path, model_type)
+        manifest_path = publication_root / "shards/shard-0001/manifest.available.json"
+        manifest = ShardManifest.model_validate_json(manifest_path.read_bytes())
+        tampered = ShardManifest.model_validate(
+            manifest.model_copy(update={"plan_sha256": "f" * 64}).model_dump(
+                by_alias=True
+            )
+        )
+        manifest_path.write_bytes(canonical_json_bytes(tampered) + b"\n")
+        return receipt
+
+    monkeypatch.setattr(worker_module, "_read_control", tamper_after_receipt)
+
+    with pytest.raises(ValueError, match="receipt does not match the available shard"):
+        run_mlx_teacher_capture_process(
+            plan=plan,
+            teacher_root=teacher_root,
+            tokenizer_root=tokenizer_root,
+            dataset_root=dataset_root,
+            publication_root=publication_root,
+            shard_id="shard-0001",
+            transaction_id="transaction-0001",
+            python_executable=sys.executable,
+            timeout_seconds=30,
+        )
+
+
 def test_runtime_version_mismatch_fails_before_publication(monkeypatch, tmp_path):
     plan, teacher_root, tokenizer_root, dataset_root = _local_plan(tmp_path)
     fake_root = _write_fake_mlx_runtime(tmp_path, mlx_lm_version="different-version")

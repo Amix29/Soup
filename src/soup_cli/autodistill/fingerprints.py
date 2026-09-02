@@ -13,6 +13,21 @@ from soup_cli.autodistill.contract import (
     canonicalize_jsonl_bytes,
 )
 
+_HASH_CHUNK_BYTES = 8 * 1024 * 1024
+
+
+def _stream_file(path: Path, *, retain_bytes: bool) -> tuple[int, str, bytes]:
+    digest = hashlib.sha256()
+    size = 0
+    retained: list[bytes] = []
+    with path.open("rb") as handle:
+        while chunk := handle.read(_HASH_CHUNK_BYTES):
+            size += len(chunk)
+            digest.update(chunk)
+            if retain_bytes:
+                retained.append(chunk)
+    return size, digest.hexdigest(), b"".join(retained)
+
 
 def _safe_file(root: Path, relative_path: str) -> Path:
     root_absolute = os.path.abspath(root)
@@ -37,11 +52,19 @@ def _safe_file(root: Path, relative_path: str) -> Path:
     return path
 
 
-def _verify_file(root: Path, expected: FileDigest) -> bytes:
-    data = _safe_file(root, expected.path).read_bytes()
-    if len(data) != expected.bytes:
+def _verify_file(
+    root: Path,
+    expected: FileDigest,
+    *,
+    retain_bytes: bool = True,
+) -> bytes:
+    size, digest, data = _stream_file(
+        _safe_file(root, expected.path),
+        retain_bytes=retain_bytes,
+    )
+    if size != expected.bytes:
         raise ArtifactCorruptionError(f"fingerprinted file {expected.path!r} byte count mismatch")
-    if hashlib.sha256(data).hexdigest() != expected.sha256:
+    if digest != expected.sha256:
         raise ArtifactCorruptionError(f"fingerprinted file {expected.path!r} sha256 mismatch")
     return data
 
@@ -54,11 +77,14 @@ def verify_teacher_fingerprint(
     """Verify only the teacher files needed by capture; no student path is accepted."""
 
     root = Path(teacher_root)
-    config = _safe_file(root, "config.json").read_bytes()
-    if hashlib.sha256(config).hexdigest() != plan.teacher.config_sha256:
+    _, config_digest, _ = _stream_file(
+        _safe_file(root, "config.json"),
+        retain_bytes=False,
+    )
+    if config_digest != plan.teacher.config_sha256:
         raise ArtifactCorruptionError("teacher config.json sha256 mismatch")
     for expected in plan.teacher.weights:
-        _verify_file(root, expected)
+        _verify_file(root, expected, retain_bytes=False)
 
 
 def verify_tokenizer_fingerprint(
@@ -87,7 +113,7 @@ def verify_tokenizer_file_fingerprint(
 
     root = Path(tokenizer_root)
     for expected in plan.tokenizer.files:
-        _verify_file(root, expected)
+        _verify_file(root, expected, retain_bytes=False)
 
 
 def verify_dataset_fingerprint(

@@ -17,6 +17,7 @@ from soup_cli.autodistill.contract import (
     AutoDistillPlan,
     CaptureToken,
     ShardManifest,
+    canonical_json_bytes,
     canonical_sha256,
 )
 from soup_cli.autodistill.publisher import CaptureShardPublisher
@@ -146,6 +147,93 @@ def test_publisher_rejects_duplicate_reordered_and_wrong_policy_rows(tmp_path):
     wrong_temperature = CaptureToken.model_validate(wrong_temperature_payload)
     with pytest.raises(ValueError, match="temperature does not match plan"):
         _publisher(root, plan).publish((wrong_temperature,))
+
+
+def test_publisher_rejects_student_rollout_at_teacher_only_boundary(tmp_path):
+    plan = _plan()
+    teacher_row = _captures(plan)[0]
+    payload = teacher_row.model_dump(by_alias=True)
+    payload.update(
+        {
+            "trajectory_kind": "student_rollout",
+            "target_token_id": None,
+            "student_sampled_token_id": teacher_row.target_token_id,
+        }
+    )
+    student_row = CaptureToken.model_validate(payload)
+
+    with pytest.raises(ValueError, match="teacher_expert rows only"):
+        _publisher(tmp_path / "capture-cache", plan).publish(
+            (student_row,), stop_after="staging"
+        )
+
+
+def test_publisher_constructor_rejects_shard_path_escape(tmp_path):
+    with pytest.raises(ValueError, match="outside the publication root"):
+        CaptureShardPublisher(
+            root=tmp_path / "capture-cache",
+            plan=_plan(),
+            shard_id="../../escaped",
+            transaction_id="transaction-0001",
+        )
+
+
+def test_resume_rejects_tampered_manifest_hash_chain(tmp_path):
+    plan = _plan()
+    rows = _captures(plan)
+    root = tmp_path / "capture-cache"
+    _publisher(root, plan).publish(rows, stop_after="complete")
+    path = root / ".transactions/transaction-0001/manifest.complete.json"
+    manifest = ShardManifest.model_validate_json(path.read_bytes())
+    tampered = ShardManifest.model_validate(
+        manifest.model_copy(
+            update={"previous_manifest_sha256": "f" * 64}
+        ).model_dump(by_alias=True)
+    )
+    path.write_bytes(canonical_json_bytes(tampered) + b"\n")
+
+    with pytest.raises(ArtifactCorruptionError, match="manifest hash chain is broken"):
+        _publisher(root, plan).publish(rows)
+
+
+def test_publisher_rejects_top_k_cardinality_that_disagrees_with_plan(tmp_path):
+    plan = _plan()
+    smaller_policy = plan.probability_policy.model_copy(
+        update={"top_k": plan.probability_policy.top_k - 1}
+    )
+    capture_plan = plan.model_copy(update={"probability_policy": smaller_policy})
+    wrong_top_k = _captures(capture_plan)[0]
+
+    with pytest.raises(ValueError, match="top-k cardinality does not match plan"):
+        _publisher(tmp_path / "capture-cache", plan).publish(
+            (wrong_top_k,), stop_after="staging"
+        )
+
+
+def test_publisher_rejects_context_longer_than_plan_limit(tmp_path):
+    plan = _plan()
+    row = _captures(plan)[0]
+    payload = row.model_dump(by_alias=True)
+    payload["context_token_ids"] = [1] * (plan.capture.max_sequence_length + 1)
+    long_context = CaptureToken.model_validate(payload)
+
+    with pytest.raises(ValueError, match="context exceeds plan max_sequence_length"):
+        _publisher(tmp_path / "capture-cache", plan).publish(
+            (long_context,), stop_after="staging"
+        )
+
+
+def test_publisher_rejects_vocabulary_size_that_disagrees_with_plan(tmp_path):
+    plan = _plan()
+    row = _captures(plan)[0]
+    payload = row.model_dump(by_alias=True)
+    payload["vocab_size"] = plan.capture.vocab_size + 1
+    wrong_vocabulary = CaptureToken.model_validate(payload)
+
+    with pytest.raises(ValueError, match="vocabulary does not match plan"):
+        _publisher(tmp_path / "capture-cache", plan).publish(
+            (wrong_vocabulary,), stop_after="staging"
+        )
 
 
 def test_plan_file_binds_publication_root_before_any_transaction(tmp_path):
