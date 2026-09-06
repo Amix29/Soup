@@ -250,6 +250,8 @@ More export targets (ONNX, TensorRT, AWQ, GPTQ, BitNet) and deployment options l
 Prefer a browser? `soup ui` serves a local dashboard for experiments,
 training setup, live metrics, dataset exploration and model chat.
 
+![Soup Web UI — New Training](docs/assets/web-ui-new-training.png)
+
 [Web UI documentation](docs/serving-and-export.md#web-ui)
 
 ## Configuration
