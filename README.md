@@ -11,6 +11,7 @@
 <p align="center">
   <a href="https://trysoup.dev">Website</a> &middot;
   <a href="#quick-start">Quick Start</a> &middot;
+  <a href="#web-ui">Web UI</a> &middot;
   <a href="#configuration">Config</a> &middot;
   <a href="#documentation">Docs</a> &middot;
   <a href="docs/commands.md">Commands</a> &middot;
@@ -244,6 +245,21 @@ soup export --model ./output --format gguf --quant q4_k_m   # GGUF for Ollama / 
 More export targets (ONNX, TensorRT, AWQ, GPTQ, BitNet) and deployment options live in
 [`docs/serving-and-export.md`](docs/serving-and-export.md).
 
+## Web UI
+
+Prefer a browser? `soup ui` serves a local dashboard for experiments,
+training setup, live metrics, dataset exploration and model chat.
+
+```bash
+pip install "soup-cli[ui]"
+soup ui
+# Opens http://127.0.0.1:7860
+```
+
+![Soup Web UI — New Training](docs/assets/web-ui-new-training.png)
+
+[Web UI documentation](docs/serving-and-export.md#web-ui)
+
 ## Configuration
 
 A complete `soup.yaml`:
@@ -315,6 +331,7 @@ soup train  --config soup.yaml        # train (SFT/DPO/GRPO/PPO/KTO/ORPO/SimPO/I
 soup infer  --model ./output --input prompts.jsonl   # batch inference
 soup chat   --model ./output          # interactive chat
 soup serve  --model ./output          # OpenAI-compatible API server
+soup ui                               # local browser dashboard
 soup merge  --adapter ./output        # merge LoRA into the base model
 soup export --model ./output --format gguf           # export for deployment
 soup eval   benchmark --model ./output               # evaluate
