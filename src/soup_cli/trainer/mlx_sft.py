@@ -27,6 +27,9 @@ from soup_cli.config.schema import SoupConfig
 
 console = Console()
 
+# Chat key for the masked dataset, matching upstream's `chat_feature` default.
+_CHAT_KEY = "messages"
+
 
 def _count_safetensors_tensors(path: str) -> int:
     """Number of tensors declared in a ``.safetensors`` file's own header.
@@ -132,7 +135,24 @@ class MLXSFTTrainerWrapper:
 
     def _check_unsupported(self) -> None:
         tcfg = self.config.training
+        dcfg = self.config.data
         unsupported = []
+        # #683 review: the per-message `train` field has no MLX equivalent --
+        # `MaskedChatDataset` supervises every assistant turn and reads no
+        # per-message flag. It looked rejected only because the mutual-
+        # exclusion validator fires while `train_on_responses_only` is at its
+        # `true` default; set that to false and the field was dropped in
+        # silence, which is the shape of the defect #683 reports.
+        if getattr(dcfg, "train_on_messages_with_train_field", False):
+            unsupported.append(
+                "data.train_on_messages_with_train_field (MLX supervises "
+                "every assistant turn; the per-message flag is not read)"
+            )
+        if getattr(dcfg, "train_on_prompt", False):
+            unsupported.append(
+                "data.train_on_prompt (MLX masks the prompt or supervises the "
+                "whole sequence; there is no per-field switch)"
+            )
         if tcfg.quantization == "8bit":
             unsupported.append("quantization=8bit (use mlx-community 4bit models)")
         if tcfg.use_galore:
@@ -332,12 +352,77 @@ class MLXSFTTrainerWrapper:
             grad_accumulation_steps=grad_accumulation_steps,
         )
 
-        train_dataset = CacheDataset(create_dataset(train_rows, self.tokenizer, args))
-        val_dataset = (
-            CacheDataset(create_dataset(val_rows, self.tokenizer, args))
-            if val_rows
-            else None
+        # #683: `data.train_on_responses_only` defaults to True and was reaching
+        # nothing here -- no mask was passed, so every MLX SFT run trained on
+        # system and user turns against the documented default.
+        #
+        # The route in is an attribute set rather than a constructor kwarg:
+        # upstream reads `getattr(config, "mask_prompt", False)`
+        # (`datasets.py:180`) off the args object, and `TrainingArgs` has no
+        # such field, so `TrainingArgs(mask_prompt=...)` raises TypeError.
+        #
+        # But that only gives the right answer for prompt/completion rows.
+        # `ChatDataset` masks a single prefix before `messages[-1]`, so on
+        # multi-turn chat it supervises the last assistant turn and silently
+        # drops the earlier ones -- a different wrong distribution, not a fix.
+        # Chat rows therefore go through Soup's own per-token mask, injected
+        # via `train(loss=..., iterate_batches=...)`.
+        from soup_cli.trainer.mlx_masking import plan_response_masking
+
+        responses_only = bool(getattr(cfg.data, "train_on_responses_only", False))
+        plan = plan_response_masking(
+            responses_only, train_rows[0] if train_rows else {}
         )
+        use_token_mask = plan.token_mask
+        args.mask_prompt = plan.mask_prompt
+        if plan.warning:
+            console.print(f"[yellow]MLX backend ignores: {plan.warning}[/]")
+
+        if use_token_mask:
+            from soup_cli.trainer.mlx_masking import (
+                MaskedChatDataset,
+                ResponseMaskError,
+                masked_iterate_batches,
+                masked_loss,
+            )
+
+            masked_train = MaskedChatDataset(
+                train_rows, self.tokenizer, chat_key=_CHAT_KEY
+            )
+            # Probe row 0 now. `process` is otherwise called lazily by
+            # `CacheDataset` from inside `train()`, so a template this cannot
+            # mask -- Qwen3's, which injects its thinking block only for the
+            # last assistant turn and is therefore not prefix-stable at any
+            # earlier one -- surfaced after the model had loaded, LoRA was
+            # applied and "Starting training..." had printed. The refusal is
+            # correct; its timing was not.
+            if train_rows:
+                try:
+                    masked_train.process(train_rows[0])
+                except ResponseMaskError as exc:
+                    raise ResponseMaskError(
+                        f"{exc}. Set `data.train_on_responses_only: false` to "
+                        "train on the full sequence on this model, or run the "
+                        "recipe on the transformers backend."
+                    ) from exc
+
+            train_dataset = CacheDataset(masked_train)
+            val_dataset = (
+                CacheDataset(
+                    MaskedChatDataset(val_rows, self.tokenizer, chat_key=_CHAT_KEY)
+                )
+                if val_rows
+                else None
+            )
+            train_hooks = {"loss": masked_loss, "iterate_batches": masked_iterate_batches}
+        else:
+            train_dataset = CacheDataset(create_dataset(train_rows, self.tokenizer, args))
+            val_dataset = (
+                CacheDataset(create_dataset(val_rows, self.tokenizer, args))
+                if val_rows
+                else None
+            )
+            train_hooks = {}
 
         optimizer = optim.AdamW(learning_rate=float(cfg.training.lr))
 
@@ -428,6 +513,7 @@ class MLXSFTTrainerWrapper:
                 val_dataset=val_dataset,
                 args=args,
                 training_callback=_Callback(),
+                **train_hooks,
             )
         finally:
             # A Live display left attached would corrupt the terminal if
@@ -458,7 +544,13 @@ class MLXSFTTrainerWrapper:
                     "lora_parameters": build_mlx_adapter_config(
                         lora_cfg, adapter_path=str(output_dir)
                     )["lora_parameters"],
-                    "mask_prompt": False,
+                    # #683: the EFFECTIVE masking, not a hardcoded False.
+                    # `mask_prompt` stays upstream's meaning (a single masked
+                    # prefix); `response_token_mask` is Soup's per-token mask,
+                    # which is what a multi-turn chat run actually used.
+                    "mask_prompt": bool(args.mask_prompt),
+                    "response_token_mask": use_token_mask,
+                    "train_on_responses_only": responses_only,
                     "grad_checkpoint": grad_checkpoint,
                     "grad_accumulation_steps": grad_accumulation_steps,
                 },
