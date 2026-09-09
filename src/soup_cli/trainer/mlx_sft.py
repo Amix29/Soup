@@ -466,9 +466,119 @@ class MLXSFTTrainerWrapper:
             carrying a real value on another is worse than an absent one.
             """
 
+            # #23: the last MEASURED validation loss, for the panel only.
+            # An evaluation happens every `steps_per_eval` iterations, so the
+            # panel must keep showing the last one between passes. It must NOT
+            # be written to the tracker or the SSE wire on training steps --
+            # that fabricates measurements that never happened, which is the
+            # defect #713 was blocked on (9 persisted rows for 2 evaluations).
+            _sticky_val_loss = None
+            #: Last measured training values, carried into the row an
+            #: evaluation creates so it reports no number that was not
+            #: measured somewhere. Initial 0.0 matches the transformers
+            #: callback's own initialisation (callback.py:61-63).
+            _last_loss = 0.0
+            _last_lr = 0.0
+            _last_speed = 0.0
+
+            @staticmethod
+            def _as_float(value):
+                """mlx-lm hands back a Python float (`evaluate()` calls
+                `.item()`), but a future build returning an mx scalar must not
+                put an unserialisable object on the SSE wire."""
+                if value is None:
+                    return None
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    return None
+
+            def on_val_loss_report(self, val_info: dict) -> None:
+                """mlx-lm's validation hook — the #23 checklist item.
+
+                Payload is built at ``mlx_lm/tuner/trainer.py:310-315`` as
+                ``{"iteration": it - 1, "val_loss": float, "val_time": float}``.
+                Note ``it - 1``: upstream reports validation one behind the
+                training counter. That is recorded as sent rather than
+                corrected, so a row can be matched to upstream's own log line.
+                """
+                val_loss = self._as_float(val_info.get("val_loss"))
+                if val_loss is None:
+                    # A payload without the key is not an evaluation; recording
+                    # a None row would be indistinguishable from a real one.
+                    return
+                type(self)._sticky_val_loss = val_loss
+
+                # NOTE the value this can take: upstream's `it - 1` at
+                # `it = 0` makes the initial evaluation report **step -1**, and
+                # that negative step is written to the tracker and the wire as
+                # sent. Recording upstream's own counter is deliberate -- a row
+                # can be matched to its log line -- but it does surface in a
+                # table users read, so it is said here rather than discovered.
+                step = int(val_info.get("iteration", 0) or 0)
+                epoch = (step / iters * total_epochs) if iters else 0.0
+
+                if display is not None:
+                    display.update(
+                        step=step,
+                        epoch=epoch,
+                        loss=captured.get("losses", [0.0])[-1] if captured.get("losses") else 0.0,
+                        lr=cfg.training.lr,
+                        val_loss=val_loss,
+                    )
+                if tracker is not None and run_id:
+                    try:
+                        # `log_metrics` defaults loss/lr/speed to 0.0, not None,
+                        # so a bare val row writes three training columns that
+                        # no step measured -- over half the `loss` series at a
+                        # realistic cadence. The merged transformers producer
+                        # carries `_last_loss` / `_last_lr` into the row an
+                        # evaluation creates (callback.py:205-207); this mirrors
+                        # it, so the two backends fabricate the same nothing.
+                        #
+                        # An evaluation before the first training step still
+                        # carries the 0.0 initial value -- there is no measured
+                        # loss to carry yet -- which is exactly what the
+                        # transformers path does at the same point.
+                        tracker.log_metrics(
+                            run_id=run_id,
+                            step=step,
+                            epoch=epoch,
+                            loss=type(self)._last_loss,
+                            lr=type(self)._last_lr,
+                            speed=type(self)._last_speed,
+                            val_loss=val_loss,
+                        )
+                    except Exception:  # noqa: BLE001 — telemetry must not kill a run
+                        pass
+                try:
+                    from soup_cli.utils.sse_train_stream import TrainEvent
+                    from soup_cli.utils.train_event_buffer import push_train_event
+
+                    push_train_event(
+                        TrainEvent(
+                            type="metric",
+                            step=step,
+                            epoch=float(epoch),
+                            val_loss=val_loss,
+                        )
+                    )
+                except Exception:  # noqa: BLE001 — telemetry must not kill a run
+                    pass
+
             def on_train_loss_report(self, train_info: dict) -> None:
                 loss = train_info.get("train_loss", 0.0)
                 captured.setdefault("losses", []).append(loss)
+                # Carried for the validation row, which has no training numbers
+                # of its own. Recorded BEFORE the display guard on purpose: a
+                # run with no display still reaches this hook, and reading them
+                # after the early return would leave every carried value at its
+                # initial state for exactly the configuration that has no panel
+                # to notice. (The same early-return trap that made the SSE test
+                # below vacuous.)
+                type(self)._last_loss = loss
+                type(self)._last_lr = train_info.get("learning_rate", cfg.training.lr)
+                type(self)._last_speed = train_info.get("iterations_per_second", 0.0)
                 if display is None:
                     return
 
@@ -489,6 +599,11 @@ class MLXSFTTrainerWrapper:
                     lr=lr_value,
                     speed=speed,
                     gpu_mem=gpu_mem,
+                    # Sticky, and deliberately only here: the panel keeps the
+                    # last measured validation loss between evaluations, while
+                    # the tracker and the wire below receive nothing, so no row
+                    # or event claims a measurement that did not happen.
+                    val_loss=type(self)._sticky_val_loss,
                 )
                 if tracker is not None and run_id:
                     tracker.log_metrics(
