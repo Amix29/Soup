@@ -206,7 +206,8 @@ def apply_variant_loss(
     - ``advantages``: group-relative advantages, shape ``[B]`` or ``[B, T]``.
     - ``beta``: PPO-style KL coefficient (used by variants that reference
       a frozen ref model).
-    - ``delta``: symmetric clipping radius (only used by ``two_sided``).
+    - ``delta``: symmetric clipping radius (used by ``two_sided`` and, as the
+      sequence-level clipping radius, by ``gspo``).
     - ``completion_mask``: optional ``[B, T]`` 0/1 mask (1 where token is in
       the completion). When supplied, length-normalising variants
       (``bnpo``) divide by ``mask.sum(-1).clamp(min=1)``.
