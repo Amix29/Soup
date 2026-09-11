@@ -73,6 +73,15 @@ def doctor(
             "measure sequential read throughput."
         ),
     ),
+    config: str | None = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help=(
+            "Also check a soup.yaml: report which of the settings it actually "
+            "sets are not read on its task and backend (#755)."
+        ),
+    ),
 ):
     """Check system dependencies, GPU, and compatibility."""
     console.print("[bold]Soup Doctor[/] - checking your environment...\n")
@@ -183,7 +192,74 @@ def doctor(
     else:
         console.print("\n[bold green]All checks passed![/] Your environment is ready.")
 
+    # After the environment summary on purpose: "All checks passed" reports on
+    # the environment, and printing config findings above it read as though the
+    # green line covered them too.
+    if config:
+        _check_config_support(config)
+
     console.print(f"\n[dim]GitHub: [link={GITHUB_URL}]{GITHUB_URL}[/link][/]")
+
+
+def _check_config_support(config_path: str) -> None:
+    """#755 — report the settings this config sets that its backend never reads.
+
+    Only fields the user actually wrote are listed. A wall of 275 rows is not a
+    pre-flight check, and the fields sitting at their schema default are not
+    what anyone came here to ask about.
+    """
+    from soup_cli.config.backend_support import DEFAULT_BACKEND, check_config
+
+    try:
+        from soup_cli.config.loader import load_config
+
+        cfg = load_config(config_path)
+    except FileNotFoundError as exc:
+        console.print(f"\n[red]Config not found:[/] {config_path}")
+        # Non-zero deliberately: this leg is meant to be gate-able in CI, and a
+        # config that cannot be read is not a clean bill of health. `doctor`
+        # without --config keeps its old exit status.
+        raise typer.Exit(2) from exc
+    except SystemExit as exc:
+        # load_config prints its own diagnosis and raises SystemExit(1) for a
+        # schema-invalid config. SystemExit is a BaseException, so it walks
+        # past `except Exception` and the exit code contradicted the 2
+        # documented in docs/commands.md. Re-raised as 2 so all three unreadable
+        # shapes -- missing, unparseable, schema-invalid -- agree.
+        console.print("\n[red]Config could not be loaded (see above).[/]")
+        raise typer.Exit(2) from exc
+    except Exception as exc:  # invalid YAML, unreadable file
+        console.print(f"\n[red]Config could not be loaded:[/] {exc}")
+        raise typer.Exit(2) from exc
+
+    backend = getattr(cfg, "backend", DEFAULT_BACKEND)
+    gaps = check_config(cfg)
+
+    console.print(
+        f"\n[bold]Config check[/] - task=[bold]{cfg.task}[/] "
+        f"backend=[bold]{backend}[/]"
+    )
+    if not gaps:
+        console.print(
+            "  [green]Every setting this config writes is read on this backend.[/]"
+        )
+        return
+
+    table = Table(title=None, show_header=True)
+    # overflow="fold" on both text columns: a dotted field name is one
+    # unbreakable word, so Rich ellipsises it on a narrow terminal and the row
+    # says a setting is ignored without saying which one. Folding keeps the
+    # name and the reason legible at any width.
+    table.add_column("setting", style="bold", overflow="fold")
+    table.add_column("status", justify="center")
+    table.add_column("why", overflow="fold")
+    for entry in gaps:
+        table.add_row(entry.field, f"[yellow]{entry.status}[/]", entry.describe())
+    console.print(table)
+    console.print(
+        f"  [yellow]{len(gaps)} setting(s) written here are not read on "
+        f"backend={backend}.[/]"
+    )
 
 
 def _get_mlx_info() -> dict:
