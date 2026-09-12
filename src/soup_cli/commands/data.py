@@ -2498,15 +2498,32 @@ def preprocess_dataset(
                 truncation=True,
                 padding=False,
                 return_attention_mask=True,
+                # Tokenise exactly as ``main`` (add_special_tokens defaults to
+                # True). This keeps ``main``'s truncation reservation — a
+                # truncated row still ends on the post-processor's EOS — and the
+                # post-processor BOS/EOS, so the cache's EOS stays pinned to
+                # ``main``. #785's only defect on this path is the doubled BOS,
+                # removed below for the chat path.
             )
         except Exception:  # noqa: BLE001 — tokenizer errors vary
             continue
+        input_ids = tokens["input_ids"]
+        attention_mask = tokens.get("attention_mask", [1] * len(input_ids))
+        if not is_pretrain:
+            # #785/#788: the chat template already renders the BOS; ``main``'s
+            # add_special_tokens=True prepends a second one. Drop only that one
+            # duplicated leading BOS so the row is byte-identical to ``main``
+            # apart from the extra BOS (EOS and truncation untouched). Pretrain
+            # feeds raw document text with no template BOS, so nothing to drop.
+            from soup_cli.data.loss_mask import strip_doubled_leading_bos
+
+            input_ids, attention_mask = strip_doubled_leading_bos(
+                tokenizer, input_ids, attention_mask
+            )
         rendered_rows.append(
             {
-                "input_ids": tokens["input_ids"],
-                "attention_mask": tokens.get(
-                    "attention_mask", [1] * len(tokens["input_ids"])
-                ),
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
             }
         )
 
