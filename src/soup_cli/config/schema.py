@@ -2829,12 +2829,13 @@ class TrainingConfig(BaseModel):
             "Mutually exclusive with Unsloth/MLX backends."
         ),
     )
-    # v0.28.0 — Kernel auto-composition (Liger + Unsloth + FlashAttn per-layer)
+    # v0.28.0 — reserved compatibility field; the implementation never applied
+    # the selected kernel combination (#801).
     kernel_auto_compose: bool = Field(
         default=False,
         description=(
-            "Benchmark and auto-select the fastest kernel combination "
-            "(Liger / FlashAttn / baseline) on the first few steps. (v0.28.0)."
+            "Unsupported compatibility field. Set use_liger and/or "
+            "use_flash_attn explicitly instead."
         ),
     )
     # v0.28.0 — Cross-document attention masking for sample packing
@@ -3515,6 +3516,18 @@ class TrainingConfig(BaseModel):
                 "'bfd-requeue', or 'wrapped'). Use packing: true with a "
                 "FlashAttention attn_implementation; TRL's default bfd "
                 "strategy already isolates packed documents when FA is present"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _reject_kernel_auto_compose(self) -> "TrainingConfig":
+        """Reject a selector that never applied the combination it reported."""
+        if self.kernel_auto_compose:
+            raise ValueError(
+                "kernel_auto_compose is not supported: it benchmarks the same "
+                "already-loaded model for every candidate and does not apply "
+                "the selected flags. Set kernel_auto_compose: false and enable "
+                "supported kernels explicitly with use_liger and/or use_flash_attn"
             )
         return self
 

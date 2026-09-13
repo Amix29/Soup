@@ -138,14 +138,18 @@ Legacy boolean configs continue to work unchanged.
 
 ## Kernel Auto-Composition
 
-Let Soup benchmark available kernel combinations and pick the fastest for your GPU on the first training steps:
+`training.kernel_auto_compose: true` is rejected at config load. The original implementation timed the same already-loaded model once per candidate, so it neither compared different kernel configurations nor applied the name it reported.
+
+Choose the supported optimization explicitly instead:
 
 ```yaml
 training:
-  kernel_auto_compose: true
+  use_liger: true
+  # or, on a compatible CUDA setup:
+  use_flash_attn: true
 ```
 
-Enumerates baseline / Liger / FlashAttention / Cut-Cross-Entropy combos, benchmarks each briefly on the trainer's actual model (forward-only under `torch.no_grad()` so live gradients aren't polluted), and adopts the fastest. Falls back to baseline on CPU and backs off for unsloth/mlx backends (both manage kernels internally). Wired across every transformer-backend trainer (SFT, DPO, GRPO, KTO, ORPO, SimPO, IPO, PPO, Reward-Model, Embedding, Pretrain).
+On Apple Silicon, keep both flags disabled and use `backend: mlx`; MLX manages its own kernels.
 
 
 ## Cross-Document Attention Masking
