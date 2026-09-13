@@ -40,7 +40,7 @@ def test_magpie_default_quality_never_calls_legacy_toxicity_scorer(monkeypatch) 
     def fail_if_called(_text):
         raise AssertionError("Magpie must not use the keyword heuristic as a safety gate")
 
-    monkeypatch.setattr(data_score, "score_toxicity", fail_if_called)
+    monkeypatch.setattr(data_score, "score_abuse_keywords", fail_if_called)
     assert default_quality_fn(
         "Explain why a baseline matters in model evaluation.",
         "A baseline makes changes measurable and helps distinguish signal from noise.",
