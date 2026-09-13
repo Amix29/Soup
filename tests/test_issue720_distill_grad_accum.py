@@ -278,7 +278,7 @@ def test_without_token_weighting_the_gradient_scales_with_the_step_count(tmp_pat
     assert accumulated / reference == pytest.approx(4.0, rel=1e-5)
 
 
-def test_distill_trainer_sets_loss_kwargs_contract_after_trainer_init():
+def test_distill_trainer_sets_loss_kwargs_contract_after_trainer_init(tmp_path):
     """The contract must be set after ``super().__init__``, which assigns the flag.
 
     Kept alongside the measurement because moving the assignment above the
@@ -310,3 +310,22 @@ def test_distill_trainer_sets_loss_kwargs_contract_after_trainer_init():
     ]
     assert flag_at, "_DistillTrainer never assigns self.model_accepts_loss_kwargs"
     assert min(flag_at) > super_at, "the flag is set before super().__init__ overwrites it"
+
+    trainer_cls = _compile_distill_trainer()
+    config = transformers.LlamaConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+    )
+    trainer = trainer_cls(
+        model=transformers.LlamaForCausalLM(config),
+        args=transformers.TrainingArguments(
+            output_dir=str(tmp_path / "loss-contract"),
+            report_to=[],
+            use_cpu=True,
+        ),
+    )
+    assert trainer.model_accepts_loss_kwargs is True
