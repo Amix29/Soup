@@ -831,6 +831,8 @@ class TestQwen35StreamingSetup:
                 target_modules="auto",
                 use_dora=False,
                 use_rslora=False,
+                rank_pattern=None,
+                alpha_pattern=None,
             ),
         )
         model_cfg = types.SimpleNamespace(
