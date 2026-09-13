@@ -286,7 +286,8 @@ def tool_data_score(args: dict) -> dict:
     return {
         "total": rep.total,
         "pii_flagged": rep.pii_flagged,
-        "violence_keyword_flagged": rep.toxic_flagged,
+        "toxic_flagged": rep.toxic_flagged,
+        "abuse_keyword_flagged": rep.toxic_flagged,
         "decontaminated_removed": rep.decontaminated_removed,
         "languages": dict(rep.languages),
         "educational_mean": rep.educational_mean,
@@ -849,7 +850,7 @@ def _readonly_specs() -> list[ToolSpec]:
             name="data_score",
             title="Score dataset",
             description=(
-                "Data-quality scorecard: PII, abuse/violence keyword triage, "
+                "Data-quality scorecard: PII, abuse-keyword triage, "
                 "language mix, educational value."
             ),
             input_schema={

@@ -88,7 +88,7 @@ def score(
     table.add_column("Value")
     table.add_row("Total rows", str(report.total))
     table.add_row("PII flagged", str(report.pii_flagged))
-    table.add_row("Violence-keyword flagged", str(report.toxic_flagged))
+    table.add_row("Abuse-keyword flagged", str(report.toxic_flagged))
     table.add_row("Edu mean", f"{report.educational_mean:.3f}")
     table.add_row("Decontaminated", str(report.decontaminated_removed))
     for lang, count in sorted(report.languages.items(), key=lambda kv: -kv[1]):
@@ -188,25 +188,25 @@ def decontaminate(
 
 def toxicity(
     input: str = typer.Option(..., "--input", "-i"),
-    output: str = typer.Option("violence_keyword_flagged.jsonl", "--output", "-o"),
+    output: str = typer.Option("toxicity.jsonl", "--output", "-o"),
     threshold: float = typer.Option(
         0.05, "--threshold", min=0.0, max=1.0,
-        help="Rows meeting the abuse/violence-keyword threshold are kept.",
+        help="Rows meeting the abuse-keyword threshold are kept.",
     ),
 ):
-    """Run a violence-keyword heuristic (not a toxicity classifier)."""
-    from soup_cli.utils.data_score import extract_row_text, score_violence_keywords
+    """Run an abuse-keyword heuristic (not a toxicity classifier)."""
+    from soup_cli.utils.data_score import extract_row_text, score_abuse_keywords
 
     rows = _read_rows(input)
     out_rows = []
     for row in rows:
         try:
             text = extract_row_text(row)
-            s = score_violence_keywords(text) if text else 0.0
+            s = score_abuse_keywords(text) if text else 0.0
         except (TypeError, ValueError):
             s = 0.0
         if s >= threshold:
-            out_rows.append({**row, "_violence_keyword_score": s})
+            out_rows.append({**row, "_toxicity": s, "_abuse_keyword_score": s})
     path = _write_rows(out_rows, output)
     console.print(
         Panel(
@@ -214,7 +214,7 @@ def toxicity(
             f"Flagged:    [bold]{len(out_rows)}[/]\n"
             f"Threshold:  [bold]{threshold:.3f}[/]\n"
             f"Output:     [bold]{escape(path)}[/]",
-            title="[bold green]Violence-keyword heuristic[/]",
+            title="[bold green]Abuse-keyword heuristic[/]",
         )
     )
 

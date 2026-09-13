@@ -126,9 +126,9 @@ soup data demo                                List bundled demo JSONL fixtures
 soup data demo alpaca_demo --output ./d.jsonl Copy a bundled demo JSONL fixture
 soup data forge --docs ./docs --task sft --target-rows 1000  Synthetic data pipeline + provenance
 soup data forge --docs ./docs --hub modelscope --teacher owner/name  Pre-fetch the teacher from an alternative hub
-soup data score --input rows.jsonl            Composite quality scorecard (PII + toxicity + lang + edu)
+soup data score --input rows.jsonl            Composite quality scorecard (PII + keyword triage + lang + edu)
 soup data decontaminate --input rows.jsonl --benchmarks mmlu,gsm8k  Drop benchmark-overlap rows
-soup data toxicity --input rows.jsonl -o tox.jsonl  Flag abuse/violence keyword matches (heuristic)
+soup data toxicity --input rows.jsonl -o tox.jsonl  Flag abuse-keyword matches (heuristic)
 soup data langdetect --input rows.jsonl -o tagged.jsonl  Tag each row with language code
 soup data pii --input rows.jsonl -o pii.jsonl Flag rows containing email/phone/SSN/credit-card
 soup data educational --input rows.jsonl -o scored.jsonl  Score educational value per row

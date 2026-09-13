@@ -9,7 +9,7 @@ Pieces:
 - PII detection via narrow regex set (email/phone/SSN/credit-card)
 - language detection via small character-frequency heuristic, with
   optional ``langdetect`` fallback for Windows users
-- abuse/violence keyword scoring (a fast, dependency-free heuristic, not a
+- abuse-keyword scoring (a fast, dependency-free heuristic, not a
   toxicity classifier)
 - educational-value score via length + lexical-diversity proxy
 
@@ -400,13 +400,13 @@ def detect_language(text: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Abuse/violence keyword heuristic
+# Abuse-keyword heuristic
 # ---------------------------------------------------------------------------
 
 
 # Avoid ambiguous process, medical, and security terms such as ``kill``,
-# ``die``, and ``attack``. This remains a triage heuristic: strong abuse terms
-# and explicit threat/harassment phrases are signals, not a safety verdict.
+# ``die``, and ``attack``. This remains a narrow triage heuristic: keyword
+# matches are signals, not a safety verdict.
 _ABUSE_KEYWORDS: frozenset[str] = frozenset(
     {
         "abuse",
@@ -424,45 +424,32 @@ _ABUSE_KEYWORDS: frozenset[str] = frozenset(
         "worthless",
     }
 )
-_ABUSE_PHRASES: tuple[tuple[str, ...], ...] = (
-    ("find", "where", "you", "live"),
-    ("go", "back", "to", "your", "country"),
-    ("hope", "you", "suffer"),
-    ("hurt", "your", "family"),
-    ("kill", "you"),
-    ("nobody", "wants", "your", "kind"),
-    ("you", "should", "die"),
-)
 
 
-def score_violence_keywords(text: Any) -> float:
-    """Return a [0, 1] abuse/violence-keyword triage score.
+def score_abuse_keywords(text: Any) -> float:
+    """Return a [0, 1] abuse-keyword triage score.
 
     This is intentionally not presented as a toxicity classifier. Ambiguous
-    technical and medical action words are excluded unless they form an
-    explicit threat phrase.
+    technical and medical action words are excluded. The deliberately small
+    keyword set has limited recall and can still flag benign uses of insults.
     """
     s = _require_str(text, name="text")
     tokens = _tokenise(s)
     if not tokens:
         return 0.0
     hits = sum(1 for token in tokens if token in _ABUSE_KEYWORDS)
-    for phrase in _ABUSE_PHRASES:
-        width = len(phrase)
-        if any(tuple(tokens[index:index + width]) == phrase for index in range(len(tokens))):
-            hits += 1
     # Sub-linear weighting so long benign documents don't accumulate noise.
     score = min(1.0, hits / max(1, len(tokens) ** 0.5))
     return score
 
 
 def score_toxicity(text: Any) -> float:
-    """Compatibility name for :func:`score_violence_keywords`.
+    """Compatibility name for :func:`score_abuse_keywords`.
 
     The function name predates issue #821. Its result is a keyword heuristic,
     not a general toxicity probability.
     """
-    return score_violence_keywords(text)
+    return score_abuse_keywords(text)
 
 
 # ---------------------------------------------------------------------------
@@ -539,7 +526,7 @@ def compute_scorecard(
         except ValueError as exc:
             _LOG.debug("pii failed for row: %s", exc)
         try:
-            if score_violence_keywords(text) >= 0.05:
+            if score_abuse_keywords(text) >= 0.05:
                 toxic_flagged += 1
         except ValueError as exc:
             _LOG.debug("toxicity failed for row: %s", exc)
@@ -674,7 +661,7 @@ __all__ = [
     "ngram_overlap_ratio",
     "ngram_set",
     "score_educational_value",
+    "score_abuse_keywords",
     "score_toxicity",
-    "score_violence_keywords",
     "write_jsonl_rows",
 ]

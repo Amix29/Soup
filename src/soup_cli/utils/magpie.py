@@ -264,7 +264,7 @@ _QUALITY_MIN_EDUCATIONAL = 0.1
 def default_quality_fn(instruction: str, response: str) -> bool:
     """Keep a row if it is non-empty and minimally educational.
 
-    The default filter deliberately does not treat the abuse/violence keyword
+    The default filter deliberately does not treat the abuse-keyword
     heuristic as a toxicity classifier. Callers that need a safety policy can
     inject an explicit ``quality_fn`` backed by their chosen classifier.
     """
