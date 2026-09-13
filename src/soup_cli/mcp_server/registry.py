@@ -278,7 +278,7 @@ def tool_data_validate(args: dict) -> dict:
 
 
 def tool_data_score(args: dict) -> dict:
-    """`soup data score` — PII / toxicity / language / educational scorecard."""
+    """`soup data score` — PII / keyword triage / language / educational scorecard."""
     from soup_cli.utils.data_score import compute_scorecard
 
     rows = _load_data_rows(_require_str(args, "data"))
@@ -286,7 +286,7 @@ def tool_data_score(args: dict) -> dict:
     return {
         "total": rep.total,
         "pii_flagged": rep.pii_flagged,
-        "toxic_flagged": rep.toxic_flagged,
+        "violence_keyword_flagged": rep.toxic_flagged,
         "decontaminated_removed": rep.decontaminated_removed,
         "languages": dict(rep.languages),
         "educational_mean": rep.educational_mean,
@@ -848,7 +848,10 @@ def _readonly_specs() -> list[ToolSpec]:
         ToolSpec(
             name="data_score",
             title="Score dataset",
-            description="Data-quality scorecard: PII, toxicity, language mix, educational value.",
+            description=(
+                "Data-quality scorecard: PII, abuse/violence keyword triage, "
+                "language mix, educational value."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {"data": _DATA_ARG},

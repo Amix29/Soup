@@ -2873,7 +2873,9 @@ def gen_magpie(
         512, "--max-tokens", help="Max tokens per generation [1, 16384]"
     ),
     quality_filter: bool = typer.Option(
-        True, "--quality-filter/--no-quality-filter", help="Apply v0.47 quality filter"
+        True,
+        "--quality-filter/--no-quality-filter",
+        help="Apply non-empty + educational heuristics (not a toxicity classifier)",
     ),
     plan_only: bool = typer.Option(
         False, "--plan-only", help="Validate + print plan; do not generate."
