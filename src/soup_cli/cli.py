@@ -172,7 +172,7 @@ from soup_cli.commands import plugins as plugins_cmd  # noqa: E402
 app.add_typer(
     plugins_cmd.app,
     name="plugins",
-    help="List, enable, disable Soup plugins (v0.45.0).",
+    help="Discover, list, enable, and disable Soup plugins.",
 )
 
 # v0.46.0 Part B — Agent Forge.
