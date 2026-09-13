@@ -129,6 +129,71 @@ def test_yaml_body_cap_runs_before_json_parsing(
     assert oversized_response.status_code == 413
 
 
+def test_oversized_content_length_rejects_without_reading_body() -> None:
+    """The header fast path must stop before the first receive call."""
+    from soup_cli.ui.app import _RequestBodySizeLimitMiddleware
+
+    sent: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, object]:
+        raise AssertionError("body was read despite oversized Content-Length")
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    async def downstream(scope, receive_body, send_response) -> None:
+        raise AssertionError("downstream app was called")
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/api/config/validate",
+        "headers": [(b"content-length", b"6")],
+    }
+
+    middleware = _RequestBodySizeLimitMiddleware(
+        downstream,
+        limits={"/api/config/validate": 5},
+    )
+    asyncio.run(middleware(scope, receive, send))
+
+    assert sent[0]["status"] == 413
+
+
+@pytest.mark.parametrize(("body", "expected_status"), [(b"12345", 204), (b"123456", 413)])
+def test_body_cap_exact_boundary(body: bytes, expected_status: int) -> None:
+    """Exactly the configured limit is admitted; one byte more is refused."""
+    from soup_cli.ui.app import _RequestBodySizeLimitMiddleware
+
+    sent: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, object]:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    async def downstream(scope, receive_body, send_response) -> None:
+        await receive_body()
+        await send_response({"type": "http.response.start", "status": 204})
+        await send_response({"type": "http.response.body", "body": b""})
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/api/config/validate",
+        "headers": [],
+    }
+
+    middleware = _RequestBodySizeLimitMiddleware(
+        downstream,
+        limits={"/api/config/validate": 5},
+    )
+    asyncio.run(middleware(scope, receive, send))
+
+    assert sent[0]["status"] == expected_status
+
+
 @pytest.mark.parametrize(("name", "recipe"), RECIPES.items(), ids=RECIPES)
 def test_every_shipped_recipe_still_validates_through_web_ui(
     ui_client: tuple[object, dict[str, str]], name: str, recipe: object
