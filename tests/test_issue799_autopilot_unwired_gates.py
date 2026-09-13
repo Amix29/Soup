@@ -114,11 +114,16 @@ def test_forgetting_threshold_is_declared_unconsumed() -> None:
         KNOWN_UNCONSUMED,
         _consumed_in_src,
         field_reaches_a_consumer,
+        training_receiver_reads,
     )
 
     assert "training.forgetting_threshold" in KNOWN_UNCONSUMED
     consumed = _consumed_in_src()
     assert "forgetting_threshold" in consumed  # ship.py's unrelated CLI argument
+    assert not training_receiver_reads(
+        Path(__file__).resolve().parents[1].joinpath("src", "soup_cli").rglob("*.py"),
+        "forgetting_threshold",
+    )
     assert not field_reaches_a_consumer(
         "training.forgetting_threshold",
         "forgetting_threshold",
@@ -129,7 +134,9 @@ def test_forgetting_threshold_is_declared_unconsumed() -> None:
 def test_training_intelligence_documented_config_parses() -> None:
     from soup_cli.config.loader import load_config_from_string
 
-    docs = Path("docs/peft-and-efficiency.md").read_text(encoding="utf-8")
+    docs = (
+        Path(__file__).resolve().parents[1] / "docs" / "peft-and-efficiency.md"
+    ).read_text(encoding="utf-8")
     section = docs.split("## Training Intelligence", maxsplit=1)[1].split(
         "## GaLore", maxsplit=1
     )[0]

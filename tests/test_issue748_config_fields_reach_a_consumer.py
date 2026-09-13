@@ -90,13 +90,6 @@ SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "soup_cli"
 SCHEMA = "schema.py"
 SCHEMA_PATH = SRC / "config" / SCHEMA
 
-# The detector's namespace is global. This one collision is proven unrelated:
-# commands/ship.py has a CLI argument with the same name, but never reads
-# TrainingConfig.forgetting_threshold. Keep the exception field-qualified so a
-# future DataConfig field of the same name is not laundered too.
-UNRELATED_NAME_COLLISIONS = frozenset({"training.forgetting_threshold"})
-
-
 # --------------------------------------------------------------------------
 # The detector. Kept here rather than in `src/` because it is test-only
 # tooling; nothing in the shipped CLI should depend on it.
@@ -165,6 +158,44 @@ def consumed_names(paths) -> set:
     return names
 
 
+def training_receiver_reads(paths, field: str) -> bool:
+    """Whether ``field`` is read directly from a ``*.training`` receiver.
+
+    The global detector sees ``ship.py``'s unrelated local named
+    ``forgetting_threshold``. This narrower check proves that exception instead
+    of permanently suppressing the config field: the moment a consumer reads
+    ``cfg.training.forgetting_threshold`` (including through ``getattr``), the
+    allowlist-staleness test goes red.
+    """
+    for path in paths:
+        try:
+            tree = ast.parse(pathlib.Path(path).read_text(errors="ignore"))
+        except (SyntaxError, UnicodeDecodeError, ValueError):
+            continue
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.ctx, ast.Load)
+                and node.attr == field
+                and isinstance(node.value, ast.Attribute)
+                and node.value.attr == "training"
+            ):
+                return True
+            if not isinstance(node, ast.Call) or len(node.args) < 2:
+                continue
+            if not isinstance(node.func, ast.Name) or node.func.id not in {"getattr", "hasattr"}:
+                continue
+            receiver, name = node.args[:2]
+            if (
+                isinstance(receiver, ast.Attribute)
+                and receiver.attr == "training"
+                and isinstance(name, ast.Constant)
+                and name.value == field
+            ):
+                return True
+    return False
+
+
 def schema_property_reads(schema_path: pathlib.Path) -> dict:
     """Fields read inside `schema.py` `@property` bodies, keyed by property name.
 
@@ -230,8 +261,10 @@ def _consumer_modules():
 
 
 def field_reaches_a_consumer(key: str, attr: str, consumed: set) -> bool:
-    """Apply the field-qualified exceptions to the global consumed namespace."""
-    return attr in consumed and key not in UNRELATED_NAME_COLLISIONS
+    """Apply receiver-qualified checks where the global namespace collides."""
+    if key == "training.forgetting_threshold":
+        return training_receiver_reads(_consumer_modules(), attr)
+    return attr in consumed
 
 
 def _consumed_in_src() -> set:
@@ -260,7 +293,7 @@ KNOWN_UNCONSUMED = {
                           "docs/peft-and-efficiency.md:190",
     "data.mask_history": "no issue yet -- schema promises 'mask all but the last assistant turn "
                          "during loss computation'; documented at docs/data.md:692",
-    "training.early_stop_patience": "no issue yet -- schema promises 'consecutive regressions "
+    "training.early_stop_patience": "#761 -- schema promises 'consecutive regressions "
                                     "before early stopping'; documented at "
                                     "docs/peft-and-efficiency.md:622",
     "training.citation_recall_threshold": "no issue yet -- validated by utils/citation_faithful.py "
@@ -357,6 +390,23 @@ class TestTheDetectorItself:
         module = tmp_path / "consumer.py"
         module.write_text(source)
         return consumed_names([module])
+
+    def _training_receiver_reads(self, tmp_path, source: str, field: str) -> bool:
+        module = tmp_path / "receiver_consumer.py"
+        module.write_text(source)
+        return training_receiver_reads([module], field)
+
+    def test_training_receiver_read_is_field_qualified(self, tmp_path):
+        source = "def f(cfg):\n    return cfg.training.forgetting_threshold\n"
+        assert self._training_receiver_reads(tmp_path, source, "forgetting_threshold")
+
+    def test_training_receiver_getattr_is_field_qualified(self, tmp_path):
+        source = 'def f(cfg):\n    return getattr(cfg.training, "forgetting_threshold", None)\n'
+        assert self._training_receiver_reads(tmp_path, source, "forgetting_threshold")
+
+    def test_unrelated_name_does_not_count_as_training_receiver_read(self, tmp_path):
+        source = "def f(forgetting_threshold):\n    return forgetting_threshold\n"
+        assert not self._training_receiver_reads(tmp_path, source, "forgetting_threshold")
 
     def test_an_attribute_access_counts_as_consumption(self, tmp_path):
         assert "widget" in self._consumed(tmp_path, "def f(cfg):\n    return cfg.widget\n")
