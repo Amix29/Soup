@@ -103,7 +103,7 @@ def _show_table() -> None:
             escape(spec.version),
             state,
             ", ".join(hooks) if hooks else "[dim]none[/]",
-            "\n".join(resources) if resources else "[dim]none[/]",
+            escape("\n".join(resources)) if resources else "[dim]none[/]",
             escape(spec.description),
         )
     console.print(table)

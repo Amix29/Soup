@@ -7,8 +7,9 @@ at well-known points (``pre_train`` / ``post_train`` / ``pre_step`` /
 descriptive metadata in ``soup plugins``.
 
 Bundled modules and third-party ``soup_cli.plugins`` entry points are discovered
-lazily by plugin-aware CLI and training paths. Third-party hooks are opt-in and
-their enabled state persists across Soup processes.
+lazily by plugin-aware CLI and training paths. Third-party code and hooks are
+loaded only after explicit opt-in, and their enabled state persists across Soup
+processes.
 """
 
 from __future__ import annotations
@@ -92,6 +93,7 @@ class PluginSpec:
 
 
 _PLUGINS: Dict[str, PluginSpec] = {}
+_ENTRY_POINTS: Dict[str, Any] = {}
 _LOCK = RLock()
 _LOAD_LOCK = RLock()
 _DISCOVERY_COMPLETE = False
@@ -135,7 +137,7 @@ def _read_enabled_state() -> Dict[str, bool]:
             ):
                 clean[name] = value
         return clean
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError, ValueError) as exc:
         logger.warning("Ignoring unreadable plugin state %s: %s", path, exc)
         return {}
 
@@ -195,6 +197,58 @@ def _iter_plugin_entry_points() -> tuple[Any, ...]:
         else discovered.get(_ENTRY_POINT_GROUP, ())
     )
     return tuple(selected)
+
+
+def _disabled_entry_point_spec(entry_point: Any) -> PluginSpec:
+    """Represent installed metadata without importing third-party code."""
+    try:
+        version = str(entry_point.dist.version)
+    except (AttributeError, TypeError):
+        version = "unknown"
+    return PluginSpec(
+        name=entry_point.name,
+        version=version,
+        plugin=None,
+        description="Installed entry point; enable it to load third-party code.",
+        enabled=False,
+    )
+
+
+def _remember_disabled_entry_point(entry_point: Any) -> None:
+    """Publish one metadata-only placeholder while preserving the registry cap."""
+    with _LOCK:
+        if entry_point.name in _PLUGINS:
+            return
+        if len(_PLUGINS) >= _MAX_PLUGINS:
+            raise RuntimeError(f"too many plugins (max {_MAX_PLUGINS})")
+        _PLUGINS[entry_point.name] = _disabled_entry_point_spec(entry_point)
+
+
+def _load_enabled_entry_point(
+    entry_point: Any, saved: Mapping[str, bool]
+) -> set[str]:
+    """Import one explicitly enabled entry point and apply its saved state."""
+    before = set(list_plugins())
+    try:
+        loaded = entry_point.load()
+        # The supported contract is a zero-argument registration callable.
+        # Import-side-effect plugins remain compatible: if load() already
+        # registered something, do not call the returned object again.
+        if set(list_plugins()) == before and callable(loaded):
+            loaded()
+        registered = set(list_plugins()) - before
+        if entry_point.name not in registered:
+            raise ValueError(
+                f"entry point {entry_point.name!r} must register a plugin "
+                "with the same name"
+            )
+        _apply_enabled_state(registered, saved, default=True)
+        return registered
+    except Exception:
+        # A registrar may have registered one plugin before failing. Never
+        # leave partially loaded third-party code enabled.
+        _apply_enabled_state(set(list_plugins()) - before, {}, default=False)
+        raise
 
 
 def _validate_name(name: str) -> None:
@@ -339,14 +393,38 @@ def get_plugin(name: str) -> Optional[PluginSpec]:
 def enable_plugin(name: str) -> bool:
     """Mark a registered plugin enabled and persist the choice."""
     _validate_name(name)
-    with _LOCK:
-        existing = _PLUGINS.get(name)
+    with _LOAD_LOCK:
+        existing = get_plugin(name)
         if existing is None:
             raise KeyError(name)
+        was_enabled = existing.enabled
         saved = _read_enabled_state()
+        if existing.plugin is None:
+            entry_point = _ENTRY_POINTS.get(name)
+            if entry_point is None:
+                raise KeyError(name)
+            before = set(list_plugins())
+            with _LOCK:
+                _PLUGINS.pop(name, None)
+            try:
+                _load_enabled_entry_point(
+                    entry_point,
+                    {**saved, name: True},
+                )
+            except Exception as exc:
+                with _LOCK:
+                    for registered_name in set(_PLUGINS) - (before - {name}):
+                        _PLUGINS.pop(registered_name, None)
+                    _PLUGINS[name] = existing
+                raise ValueError(
+                    f"failed to enable plugin {name!r}: {type(exc).__name__}"
+                ) from exc
+            existing = get_plugin(name)
+            if existing is None:
+                raise ValueError(f"entry point {name!r} registered no plugin")
         saved[name] = True
         _write_enabled_state(saved)
-        changed = not existing.enabled
+        changed = not was_enabled
         if changed:
             _replace_enabled(name, True)
         return changed
@@ -380,6 +458,7 @@ def clear_plugins() -> None:
     with _LOAD_LOCK:
         with _LOCK:
             _PLUGINS.clear()
+            _ENTRY_POINTS.clear()
             _DISCOVERY_COMPLETE = False
 
 
@@ -387,9 +466,9 @@ def load_plugins() -> int:
     """Discover built-in modules and ``soup_cli.plugins`` entry points once.
 
     Plugin failures are caught and logged at WARNING — one bad plugin
-    must not crash a listing or training run. Third-party entry points are
-    disabled by default until the user explicitly enables them; persisted
-    choices are applied to both discovery sources.
+    must not crash a listing or training run. Bundled modules are enabled by
+    default. Third-party entry points are listed from package metadata but not
+    imported until the user explicitly enables them.
     """
     with _LOAD_LOCK:
         return _load_plugins_once()
@@ -428,31 +507,24 @@ def _load_plugins_once() -> int:
         entry_points = ()
 
     for entry_point in entry_points:
-        before = set(list_plugins())
         try:
-            loaded = entry_point.load()
-            # The supported contract is a zero-argument registration callable.
-            # Import-side-effect plugins remain compatible: if load() already
-            # registered something, do not call the returned object again.
-            if set(list_plugins()) == before and callable(loaded):
-                loaded()
-            registered = set(list_plugins()) - before
-            if not registered:
-                logger.warning(
-                    "Soup plugin entry point %r registered no plugin",
-                    entry_point.name,
-                )
-            _apply_enabled_state(registered, saved, default=False)
+            _validate_name(entry_point.name)
+            _ENTRY_POINTS[entry_point.name] = entry_point
+            if saved.get(entry_point.name, False):
+                _load_enabled_entry_point(entry_point, saved)
+            else:
+                _remember_disabled_entry_point(entry_point)
             count += 1
         except Exception:  # noqa: BLE001 — one plugin must not crash training
-            # A registrar may have registered one plugin before failing. Never
-            # leave partially loaded third-party code enabled by default.
-            _apply_enabled_state(
-                set(list_plugins()) - before, saved, default=False
-            )
+            entry_point_name = getattr(entry_point, "name", "")
+            if isinstance(entry_point_name, str) and entry_point_name in _ENTRY_POINTS:
+                try:
+                    _remember_disabled_entry_point(entry_point)
+                except RuntimeError:
+                    pass
             logger.exception(
-                "Failed to load Soup plugin entry point: %s",
-                entry_point.name,
+                "Failed to discover Soup plugin entry point: %s",
+                entry_point_name or "<unknown>",
             )
     return count
 

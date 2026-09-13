@@ -981,10 +981,17 @@ Declare it in the plugin distribution's `pyproject.toml`:
 my-plugin = "my_package.soup_plugin:register"
 ```
 
-Installed third-party plugins are **disabled by default**. Discovery imports code
-from the installed distribution so only install plugins you trust; enabling controls
-whether its hooks participate in training. The choice is stored atomically in
+Bundled Soup plugin modules are enabled by default. Installed third-party entry points
+are **disabled by default**: discovery reads their names and versions from package
+metadata without importing or executing their modules. `soup plugins enable <name>` is
+the explicit boundary that loads the selected entry point; its entry-point name must
+match the plugin name it registers. The choice is stored atomically in
 `~/.soup/plugins.json` and is reused by later Soup processes.
+
+Set `SOUP_PLUGIN_STATE_PATH` to use a different trusted local state file, for example in
+an isolated test environment. This explicit path is not confined to the current
+workspace; Soup rejects NULs, oversized paths, symlink state files, oversized content,
+and malformed JSON.
 
 ```bash
 soup plugins                       # discover and list plugins
@@ -992,7 +999,7 @@ soup plugins enable my-plugin      # opt in persistently
 soup plugins disable my-plugin
 ```
 
-`soup plugins install` deliberately exits non-zero: Soup does not run a package
+`soup plugins install` deliberately exits with status 2: Soup does not run a package
 installer on the user's behalf. Install the distribution with your trusted Python
 package workflow, then enable it explicitly.
 
