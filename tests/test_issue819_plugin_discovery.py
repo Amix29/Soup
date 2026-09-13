@@ -266,7 +266,7 @@ def test_partially_failing_entry_point_cannot_leave_plugin_enabled(
 
 
 def test_recursive_state_json_is_ignored_without_crashing(_isolated_registry):
-    nested = "[" * 1_500 + "0" + "]" * 1_500
+    nested = "[" * 5_000 + "0" + "]" * 5_000
     _isolated_registry.write_text(
         '{"version":1,"enabled":' + nested + "}",
         encoding="utf-8",
