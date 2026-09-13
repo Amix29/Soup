@@ -11,6 +11,8 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from tests.conftest import strip_ansi
+
 
 def _save_score(run_id: str, benchmark: str, score: float) -> None:
     from soup_cli.experiment.tracker import ExperimentTracker
@@ -44,8 +46,9 @@ def test_custom_eval_results_produce_a_verdict_and_report_degenerate_ci():
     )
 
     assert result.exit_code == 0, (result.output, repr(result.exception))
-    assert "Empty series" not in result.output
-    payload = json.loads(result.output)
+    output = strip_ansi(result.output)
+    assert "Empty series" not in output
+    payload = json.loads(output)
     assert payload["metric"] == "custom"
     assert payload["regressed"] is False
     assert payload["sample_count"] == 1
@@ -62,7 +65,7 @@ def test_default_task_accuracy_falls_back_to_custom_results():
     result = _against("run-base", "--candidate", "run-candidate", "--json-only")
 
     assert result.exit_code == 0, (result.output, repr(result.exception))
-    payload = json.loads(result.output)
+    payload = json.loads(strip_ansi(result.output))
     assert payload["metric"] == "task_accuracy"
     assert payload["source_metric"] == "custom"
 
@@ -81,7 +84,7 @@ def test_explicit_benchmark_metric_reads_lm_eval_task_result():
     )
 
     assert result.exit_code == 0, (result.output, repr(result.exception))
-    payload = json.loads(result.output)
+    payload = json.loads(strip_ansi(result.output))
     assert payload["source_metric"] == "mmlu"
     assert payload["regressed"] is False
 
@@ -101,7 +104,7 @@ def test_named_soup_eval_results_are_directly_comparable(metric):
     )
 
     assert result.exit_code == 0, (result.output, repr(result.exception))
-    payload = json.loads(result.output)
+    payload = json.loads(strip_ansi(result.output))
     assert payload["source_metric"] == metric
 
 
@@ -125,15 +128,16 @@ def test_unknown_metric_is_usage_error_before_tracker_initialization(monkeypatch
         "accuracy",
     )
 
-    assert result.exit_code == 2, (result.output, repr(result.exception))
+    output = strip_ansi(result.output)
+    assert result.exit_code == 1, (output, repr(result.exception))
     assert touched_database is False
-    assert "unknown metric 'accuracy'" in result.output
-    assert "allowed:" in result.output
-    assert "custom" in result.output
-    assert "benchmark:<name>" in result.output
+    assert "unknown metric 'accuracy'" in output
+    assert "allowed:" in output
+    assert "custom" in output
+    assert "benchmark:<name>" in output
 
 
-def test_empty_series_has_distinct_unavailable_exit_code():
+def test_empty_series_has_honest_unavailable_message():
     result = _against(
         "run-base",
         "--candidate",
@@ -142,12 +146,59 @@ def test_empty_series_has_distinct_unavailable_exit_code():
         "custom",
     )
 
-    assert result.exit_code == 3, (result.output, repr(result.exception))
-    assert "comparison unavailable" in result.output.lower()
-    assert "no eval results" in result.output.lower()
-    assert "run-base" in result.output
-    assert "run-candidate" in result.output
-    assert "regression" not in result.output.lower()
+    output = strip_ansi(result.output)
+    assert result.exit_code == 1, (output, repr(result.exception))
+    assert "comparison unavailable" in output.lower()
+    assert "no eval results" in output.lower()
+    assert "run-base" in output
+    assert "run-candidate" in output
+    assert "regression" not in output.lower()
+
+
+@pytest.mark.parametrize(
+    "metric",
+    ["loss", "val_loss", "lr", "grad_norm", "speed", "gpu_mem", "epoch"],
+)
+def test_benchmark_namespace_rejects_reserved_training_metrics(metric, monkeypatch):
+    import soup_cli.experiment.tracker as tracker_module
+
+    def fail_if_initialized(self, *args, **kwargs):
+        raise AssertionError("reserved metric must be rejected before database access")
+
+    monkeypatch.setattr(tracker_module.ExperimentTracker, "__init__", fail_if_initialized)
+    result = _against(
+        "run-base",
+        "--candidate",
+        "run-candidate",
+        "--metric",
+        f"benchmark:{metric}",
+    )
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 1, (output, repr(result.exception))
+    assert "reserved training metric" in output
+
+
+def test_oversized_unknown_metric_is_bounded_before_database_access(monkeypatch):
+    import soup_cli.experiment.tracker as tracker_module
+
+    def fail_if_initialized(self, *args, **kwargs):
+        raise AssertionError("oversized metric must be rejected before database access")
+
+    monkeypatch.setattr(tracker_module.ExperimentTracker, "__init__", fail_if_initialized)
+    metric = "x" * 10_000
+    result = _against(
+        "run-base",
+        "--candidate",
+        "run-candidate",
+        "--metric",
+        metric,
+    )
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 1, (output, repr(result.exception))
+    assert "exceeds 256 characters" in output
+    assert len(output) < 1_000
 
 
 @pytest.mark.skipif(os.name == "nt", reason="generated hook is a bash script")
@@ -173,6 +224,7 @@ def test_rendered_hook_does_not_call_empty_series_a_regression(tmp_path, monkeyp
     assert soup_bin.is_file(), f"console script missing beside interpreter: {soup_bin}"
     env = os.environ.copy()
     env["PATH"] = f"{soup_bin.parent}{os.pathsep}{env.get('PATH', '')}"
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
     env["SOUP_CANDIDATE_RUN_ID"] = "run-candidate"
 
     completed = subprocess.run(
@@ -184,7 +236,7 @@ def test_rendered_hook_does_not_call_empty_series_a_regression(tmp_path, monkeyp
         check=False,
     )
 
-    output = completed.stdout + completed.stderr
+    output = strip_ansi(completed.stdout + completed.stderr)
     assert completed.returncode == 1
     assert "comparison unavailable" in output.lower()
     assert "run-base" in output

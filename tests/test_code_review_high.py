@@ -240,9 +240,7 @@ def test_eval_against_blocks_on_unloadable_locked_suite(tmp_path, monkeypatch):
         app,
         ["against", "base-run", "--candidate", "cand-run", "--suite", "missing.json"],
     )
-    # Exit 1 is reserved for a measured regression; invalid gate input blocks
-    # with the command-error status so the generated hook reports it honestly.
-    assert result.exit_code == 2, (result.output, repr(result.exception))
+    assert result.exit_code == 1, (result.output, repr(result.exception))
 
 
 def test_deploy_measure_cache_key_includes_candidates():

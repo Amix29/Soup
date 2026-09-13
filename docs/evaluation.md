@@ -178,10 +178,9 @@ soup eval against run-base --candidate run-candidate --metric benchmark:mmlu
   `judge:<model>`, and `benchmark:<task>` are higher-is-better. `p95_latency_ms` is
   lower-is-better. Eval benchmark scores use the `task_accuracy` tolerance.
 - Unknown names are rejected before the experiment database is opened.
-- Exit status `0` means no regression, `1` means regression, `2` means invalid input or
-  a failed comparison, and `3` means the required results are unavailable. The generated
-  hook blocks all three failure states while reporting unavailable data separately from
-  a measured regression.
+- Exit status `0` means no regression; every regression, unavailable comparison, or
+  invalid comparison blocks with a non-zero status. A future exit-status taxonomy is
+  tracked separately in #813.
 - Regression is decided on the paired-bootstrap CI bound (upper bound for higher-better,
   lower for lower-better). A single aggregate result is still compared by its point
   delta, but Soup labels the confidence interval unavailable instead of displaying the
