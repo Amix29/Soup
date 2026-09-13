@@ -141,7 +141,7 @@ training:
 
 **Llama 3.1 NTK-aware.** Use `rope_scaling_type: llama3` for the canonical Llama 3.1 frequency-band scaling (`scale_factor=8`, `low_freq_factor=1`, `high_freq_factor=4`, `old_context_len=8192`). `detect_llama3_rope_in_config` auto-detects the block in any HF model config dict. Omit `rope_scaling_type` from your YAML (so it stays `None`) on a Llama 3.1 base and `apply_long_context_config` will auto-pick `llama3` by reading `model.config.rope_scaling` at load time — explicit caller picks still win.
 
-**LongLoRA S².** `training.use_longlora: true` requires `task=sft`, `backend=transformers`, a base in the architecture allowlist (Llama / CodeLlama / Mistral / Mixtral / Qwen / Phi), and `use_ring_attention=false`. The schema also rejects the combo with FlashAttention v3 installed (the S² custom-mask kernel conflicts with FA-v3 native custom-mask). During SFT setup, Soup installs the shifted-sparse attention forward override and reports how many attention modules were patched.
+**LongLoRA S².** `training.use_longlora: true` requires `task=sft`, `backend=transformers`, a base in the architecture allowlist (Llama / CodeLlama / Mistral / Mixtral / Qwen / Phi), and `use_ring_attention=false`. The schema also rejects the combo with FlashAttention v3 installed (the S² custom-mask kernel conflicts with FA-v3 native custom-mask). During SFT setup, Soup installs the shifted-sparse attention forward override on matching attention modules.
 
 ```yaml
 # Llama 3.1 with NTK-aware scaling out to 128k

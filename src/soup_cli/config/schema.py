@@ -1507,7 +1507,8 @@ class TrainingConfig(BaseModel):
         default=False,
         description=(
             "Force FP16 mixed precision for GRPO/RL (unsloth parity). "
-            "The GRPO trainer forwards fp16=True and bf16=False."
+            "On CUDA, the GRPO trainer forwards fp16=True and bf16=False; "
+            "on non-CUDA devices this flag does not enable FP16."
         ),
     )
     # v0.50.0 Part B — Long-context + memory-efficient RL
@@ -1644,10 +1645,10 @@ class TrainingConfig(BaseModel):
     hub: Literal["hf", "modelscope", "modelers"] = Field(
         default="hf",
         description=(
-            "Model hub for downloads + pushes. 'hf' (default), 'modelscope' "
+            "Training-time model-download hub. 'hf' (default), 'modelscope' "
             "(China-hosted; mirrors most Llama/Qwen/etc.), 'modelers' "
-            "(Openmind hub). Each backend is resolved lazily through its "
-            "matching download and upload adapter."
+            "(Openmind hub). `soup push --hub` selects its upload destination "
+            "independently of this field."
         ),
     )
 
@@ -1838,15 +1839,18 @@ class TrainingConfig(BaseModel):
         description=(
             "Extend the v0.28.0 FP8 menu to FP8 attention "
             "(axolotl-parity flag). Requires quantization_aware='fp8'. "
-            "Compatible trainer paths convert attention projections through "
-            "the shared advanced-precision setup."
+            "DPO-family, GRPO/PPO, pre-training, reward-model, and embedding "
+            "wrappers route it through the shared advanced-precision setup; "
+            "the default SFT path does not consume it."
         ),
     )
     nvfp4: bool = Field(
         default=False,
         description=(
-            "Blackwell-only NVFP4 training (unsloth + axolotl). Compatible "
-            "trainer paths apply torchao NVFP4 conversion before training."
+            "Blackwell-only NVFP4 training (unsloth + axolotl). DPO-family, "
+            "GRPO/PPO, pre-training, reward-model, and embedding wrappers "
+            "route it through torchao conversion; the default SFT path does "
+            "not consume it."
         ),
     )
     unsloth_bnb_4bit: bool = Field(
@@ -1948,8 +1952,8 @@ class TrainingConfig(BaseModel):
         description=(
             "Save an RL-aware mid-epoch checkpoint every N steps. None "
             "= use HF Trainer's per-epoch checkpoint only. Requires "
-            "task in {'grpo', 'ppo'}; the callback persists trainer, "
-            "optimizer, scheduler, RNG, and optional rollout state."
+            "task in {'grpo', 'ppo'}; the callback persists the policy "
+            "adapter, optional optimizer state, and a manifest."
         ),
     )
     rl_checkpoint_keep_last: int = Field(
@@ -3902,24 +3906,25 @@ class TrainingConfig(BaseModel):
     grace_codebook: bool = Field(
         default=False,
         description=(
-            "Opt INTO the GRACE codebook — discrete latent-space (key, "
-            "value) store for thousands of sequential knowledge edits "
-            "without norm-blowup. Knowledge editing performs live codebook "
-            "lookup and transactional writes."
+            "Reserve GRACE codebook configuration for training. Compatibility "
+            "validation only: no trainer or knowledge-edit command consumes "
+            "this field yet."
         ),
     )
     grace_codebook_size: Optional[int] = Field(
         default=None,
         description=(
-            "Codebook entry count. Required when grace_codebook=True. "
-            "Bounded [1, 100_000]. (v0.62.0 Part E)"
+            "Reserved GRACE codebook entry count. Required when "
+            "grace_codebook=True and bounded [1, 100_000], but not consumed "
+            "at runtime yet."
         ),
     )
     grace_codebook_dim: Optional[int] = Field(
         default=None,
         description=(
-            "Codebook entry dim (residual-stream width). Required when "
-            "grace_codebook=True. Bounded [1, 16_384]. (v0.62.0 Part E)"
+            "Reserved GRACE codebook entry dimension. Required when "
+            "grace_codebook=True and bounded [1, 16_384], but not consumed "
+            "at runtime yet."
         ),
     )
 
