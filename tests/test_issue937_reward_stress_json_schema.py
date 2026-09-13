@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 from soup_cli.cli import app as soup_app
 from soup_cli.trainer.rewards import load_reward_fn
 from soup_cli.utils import reward_stress
+from tests.conftest import strip_ansi
 
 runner = CliRunner()
 
@@ -26,10 +27,14 @@ def _schema(*, required: bool) -> str:
 def test_real_json_schema_reward_receives_schema_references() -> None:
     reward_fn = load_reward_fn("verifiable", verifiable_domain="json_schema")
 
-    report = reward_stress.run_stress(reward_fn, [_schema(required=True)], attacks=("empty",))
+    report = reward_stress.run_stress(reward_fn, [_schema(required=True)])
 
+    # A schema configures validation; it is not itself a valid completion, so
+    # self-acceptance is intentionally non-diagnostic for this domain.
+    assert report.reference_accept == 0.0
     assert report.gameable is False
-    assert report.attacks[0].n == 1
+    assert {attack.kind for attack in report.attacks} == set(reward_stress.ATTACKS)
+    assert all(attack.n == 1 and attack.accepted == 0 for attack in report.attacks)
 
 
 def test_schema_reference_routing_can_distinguish_gameable_and_strict() -> None:
@@ -111,4 +116,4 @@ def test_json_schema_cli_runs_with_schema_field(tmp_path, monkeypatch) -> None:
     )
 
     assert result.exit_code == 0, (result.output, repr(result.exception))
-    assert "robust" in result.output.lower()
+    assert "robust" in strip_ansi(result.output).lower()

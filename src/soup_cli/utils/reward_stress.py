@@ -153,14 +153,17 @@ def run_stress(
 ) -> StressReport:
     """Score adversarial junk completions and flag a gameable verifier.
 
-    For each attack kind, one junk completion is scored per sampled gold against
-    the REAL gold (so numeric/tool_call/json_schema verifiers get a valid
-    ``answer=`` and still must reject the junk). ``gameability`` is the overall
-    junk accept-rate; ``gameable`` iff it strictly exceeds ``max_gameable``.
+    For each attack kind, one junk completion is scored per sampled reference,
+    with that reference supplied under ``reference_key``. For answer-based
+    verifiers the reference is also a valid completion; for metadata-based
+    verifiers such as ``json_schema`` it configures the check instead.
+    ``gameability`` is the overall junk accept-rate; ``gameable`` iff it strictly
+    exceeds ``max_gameable``.
 
-    ``reference_accept`` (the golds scored as their own correct completions) is
-    reported for context — a verifier that rejects everything is broken, a
-    different problem — but does NOT set the verdict.
+    ``reference_accept`` scores each reference as its own completion and is
+    reported for context, but does NOT set the verdict. It is a useful
+    self-acceptance control only when references are valid completions; a schema
+    document, for example, need not satisfy itself as an output instance.
 
     No-gold fallback: with an empty ``golds`` each attack is scored once with no
     ``answer`` kwarg and ``reference_accept`` is ``None``.

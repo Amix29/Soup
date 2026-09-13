@@ -1125,6 +1125,13 @@ with **no** `--references` is a hard error (it can't be measured), never a false
 For the builtin `json_schema` domain, references are forwarded as `schema=` metadata; JSON objects
 selected by `--field` are decoded before the verifier scores them.
 
+Current limitation: the four built-in attack families emit plain text that is not valid JSON, so
+`json_schema` rejects them during parsing before schema-specific constraints are evaluated. The
+result therefore does not yet distinguish a strict schema from a permissive one; structure-
+preserving JSON attacks are tracked in #918. Its `reference_accept` value is also not a meaningful
+self-acceptance control for this domain because it scores the schema document as though it were an
+instance of itself (and is normally `0%`).
+
 ### Verifiable Rewards (RLVR)
 
 Use `reward_fn: verifiable` with a `verifiable_domain` for deterministic, math-checkable rewards — no judge model, no heuristics. Great for GRPO on math, code, or structured-output tasks.
