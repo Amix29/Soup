@@ -2854,14 +2854,6 @@ def recipe(
             )
             raise typer.Exit(2)
 
-        has_llm_nodes = any(node.kind in {"llm_text", "judge"} for node in dag.nodes)
-        if has_llm_nodes and provider is None and not offline:
-            console.print(
-                "[red]This recipe contains llm_text or judge nodes. Pass --provider "
-                "<ollama|anthropic|vllm>, or explicitly opt in to placeholder output "
-                "with --offline.[/]"
-            )
-            raise typer.Exit(2)
         if provider is not None and offline:
             console.print("[red]--provider and --offline cannot be used together.[/]")
             raise typer.Exit(2)
@@ -2878,6 +2870,14 @@ def recipe(
                     f"[red]Unknown --provider '{_escape(provider)}'; choose: {options}.[/]"
                 )
                 raise typer.Exit(2)
+        has_llm_nodes = any(node.kind in {"llm_text", "judge"} for node in dag.nodes)
+        if has_llm_nodes and provider is None and not offline:
+            console.print(
+                "[red]This recipe contains llm_text or judge nodes. Pass --provider "
+                "<ollama|anthropic|vllm>, or explicitly opt in to placeholder output "
+                "with --offline.[/]"
+            )
+            raise typer.Exit(2)
         if offline and has_llm_nodes:
             console.print(
                 "[yellow]Offline recipe mode: llm_text writes placeholder text and judge "

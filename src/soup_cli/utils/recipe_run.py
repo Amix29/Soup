@@ -589,15 +589,15 @@ def run_recipe(
         raise TypeError("offline must be a bool")
 
     has_llm_nodes = any(node.kind in {"llm_text", "judge"} for node in dag.nodes)
-    if has_llm_nodes and judge_provider is None and not offline:
-        raise ValueError(
-            "recipe contains llm_text or judge nodes; pass --provider or explicitly opt in "
-            "to placeholder output with --offline"
-        )
     if judge_provider is not None and offline:
         raise ValueError("judge_provider and offline mode are mutually exclusive")
     if judge_provider is None and (judge_model is not None or judge_base_url is not None):
-        raise ValueError("judge_model and judge_base_url require judge_provider")
+        raise ValueError("judge_model= and judge_base_url= require judge_provider=")
+    if has_llm_nodes and judge_provider is None and not offline:
+        raise ValueError(
+            "recipe contains llm_text or judge nodes; pass judge_provider= or explicitly "
+            "opt in with offline=True"
+        )
 
     if "\x00" in output_dir:
         raise ValueError("output_dir must not contain null bytes")

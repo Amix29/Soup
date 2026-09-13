@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
+
+from tests.conftest import strip_ansi
 
 
 def _write_recipe(tmp_path: Path) -> Path:
@@ -37,8 +40,9 @@ def test_recipe_cli_refuses_llm_nodes_without_provider(tmp_path: Path, monkeypat
         ["data", "recipe", str(recipe_path), "--execute", "--output", "out"],
     )
 
-    assert result.exit_code == 2
-    assert "--provider" in result.output
+    output = strip_ansi(result.output)
+    assert result.exit_code == 2, (output, repr(result.exception))
+    assert "--provider" in output
     assert not (tmp_path / "out").exists()
 
 
@@ -72,7 +76,7 @@ def test_recipe_cli_provider_generates_and_rejects_rows(tmp_path: Path, monkeypa
             "--output",
             "out",
             "--provider",
-            "ollama",
+            "OLLAMA",
             "--model",
             "test-model",
             "--base-url",
@@ -114,7 +118,7 @@ def test_recipe_cli_offline_mode_is_explicit_and_loud(tmp_path: Path, monkeypatc
     )
 
     assert result.exit_code == 0, result.output
-    assert "Offline recipe mode" in result.output
+    assert "Offline recipe mode" in strip_ansi(result.output)
     rows = [
         json.loads(line)
         for line in (tmp_path / "out" / "samp1.jsonl").read_text(encoding="utf-8").splitlines()
@@ -124,8 +128,6 @@ def test_recipe_cli_offline_mode_is_explicit_and_loud(tmp_path: Path, monkeypatc
 
 
 def test_run_recipe_requires_explicit_offline_opt_in(tmp_path: Path, monkeypatch) -> None:
-    import pytest
-
     from soup_cli.utils.recipe_dag import load_recipe_yaml
     from soup_cli.utils.recipe_run import run_recipe
 
@@ -133,6 +135,120 @@ def test_run_recipe_requires_explicit_offline_opt_in(tmp_path: Path, monkeypatch
     recipe_path = _write_recipe(tmp_path)
     dag = load_recipe_yaml(str(recipe_path))
 
-    with pytest.raises(ValueError, match="--provider"):
+    with pytest.raises(ValueError, match="judge_provider="):
         run_recipe(dag, output_dir="out")
+    assert not (tmp_path / "out").exists()
+
+
+def test_recipe_cli_rejects_unknown_provider_before_creating_output(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from soup_cli.cli import app
+
+    monkeypatch.chdir(tmp_path)
+    recipe_path = _write_recipe(tmp_path)
+    result = CliRunner().invoke(
+        app,
+        [
+            "data",
+            "recipe",
+            str(recipe_path),
+            "--execute",
+            "--output",
+            "out",
+            "--provider",
+            "openai",
+        ],
+    )
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 2, (output, repr(result.exception))
+    assert "Unknown --provider 'openai'" in output
+    assert not (tmp_path / "out").exists()
+
+
+def test_recipe_cli_rejects_provider_with_offline_before_creating_output(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from soup_cli.cli import app
+
+    monkeypatch.chdir(tmp_path)
+    recipe_path = _write_recipe(tmp_path)
+    result = CliRunner().invoke(
+        app,
+        [
+            "data",
+            "recipe",
+            str(recipe_path),
+            "--execute",
+            "--output",
+            "out",
+            "--provider",
+            "ollama",
+            "--offline",
+        ],
+    )
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 2, (output, repr(result.exception))
+    assert "--provider and --offline cannot be used together" in output
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [("--model", "test-model"), ("--base-url", "http://localhost:11434")],
+)
+def test_recipe_cli_requires_provider_for_provider_options(
+    tmp_path: Path,
+    monkeypatch,
+    option: str,
+    value: str,
+) -> None:
+    from soup_cli.cli import app
+
+    monkeypatch.chdir(tmp_path)
+    recipe_path = _write_recipe(tmp_path)
+    result = CliRunner().invoke(
+        app,
+        ["data", "recipe", str(recipe_path), "--execute", "--output", "out", option, value],
+    )
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 2, (output, repr(result.exception))
+    assert "--model and --base-url require --provider" in output
+    assert not (tmp_path / "out").exists()
+
+
+def test_run_recipe_rejects_provider_with_offline(tmp_path: Path, monkeypatch) -> None:
+    from soup_cli.utils.recipe_dag import load_recipe_yaml
+    from soup_cli.utils.recipe_run import run_recipe
+
+    monkeypatch.chdir(tmp_path)
+    dag = load_recipe_yaml(str(_write_recipe(tmp_path)))
+
+    with pytest.raises(ValueError, match="judge_provider and offline"):
+        run_recipe(dag, output_dir="out", judge_provider="ollama", offline=True)
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"judge_model": "test-model"}, {"judge_base_url": "http://localhost:11434"}],
+)
+def test_run_recipe_requires_provider_for_provider_parameters(
+    tmp_path: Path,
+    monkeypatch,
+    kwargs: dict[str, str],
+) -> None:
+    from soup_cli.utils.recipe_dag import load_recipe_yaml
+    from soup_cli.utils.recipe_run import run_recipe
+
+    monkeypatch.chdir(tmp_path)
+    dag = load_recipe_yaml(str(_write_recipe(tmp_path)))
+
+    with pytest.raises(ValueError, match="require judge_provider="):
+        run_recipe(dag, output_dir="out", **kwargs)
     assert not (tmp_path / "out").exists()
