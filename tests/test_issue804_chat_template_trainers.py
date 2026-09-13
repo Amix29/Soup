@@ -210,22 +210,6 @@ class TestEveryConversationalTrainerIsWired:
             wrapper.setup({"train": []})
         assert wrapper.tokenizer.chat_template == marker, task
 
-    def test_grpo_applies_override_before_fallback(self):
-        from soup_cli.trainer.grpo import GRPOTrainerWrapper
-
-        source = inspect.getsource(GRPOTrainerWrapper.setup)
-        assert source.index("apply_chat_template_override") < source.index(
-            "if not getattr(self.tokenizer, \"chat_template\""
-        )
-
-    def test_online_dpo_applies_override_before_fallback(self):
-        from soup_cli.trainer.online_dpo import OnlineDPOTrainerWrapper
-
-        source = inspect.getsource(OnlineDPOTrainerWrapper._setup_transformers)
-        assert source.index("apply_chat_template_override") < source.index(
-            "if self.tokenizer.chat_template is None"
-        )
-
     def test_online_dpo_override_beats_fallback_on_a_loaded_tokenizer(self, tmp_path):
         _requires_train_extra()
         from soup_cli.config.schema import SoupConfig

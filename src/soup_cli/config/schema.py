@@ -4291,6 +4291,8 @@ class SoupConfig(BaseModel):
         if (
             self.data.chat_template is not None
             and self.task in unsupported
+            # Streaming supports only SFT/pretrain and has its own task-specific
+            # rejection below; keep that more actionable error when enabled.
             and not self.training.stream_layers
         ):
             raise ValueError(
