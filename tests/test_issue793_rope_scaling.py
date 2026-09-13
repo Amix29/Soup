@@ -1,6 +1,7 @@
 """Regression coverage for #793: RoPE must be configured before model construction."""
 
 import json
+from copy import deepcopy
 
 import pytest
 import yaml
@@ -166,3 +167,58 @@ def test_longrope_refuses_to_invent_model_specific_factor_vectors() -> None:
     )
     with pytest.raises(ValueError, match="requires model-native short_factor, long_factor"):
         apply_long_context_config(config, 256, "longrope")
+
+
+def test_nested_gemma3_rope_parameters_are_refused_before_any_mutation() -> None:
+    _requires_train_extra()
+    from transformers import Gemma3TextConfig
+
+    from soup_cli.utils.long_context import apply_long_context_config
+
+    config = Gemma3TextConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        max_position_embeddings=64,
+    )
+    before = deepcopy(config.rope_parameters)
+
+    with pytest.raises(ValueError, match="nested rope_parameters are not supported safely"):
+        apply_long_context_config(config, 256, "linear")
+
+    assert config.max_position_embeddings == 64
+    assert config.rope_parameters == before
+
+
+def test_switching_rope_type_drops_foreign_algorithm_tunables() -> None:
+    from types import SimpleNamespace
+
+    from soup_cli.utils.long_context import apply_long_context_config
+
+    config = SimpleNamespace(
+        max_position_embeddings=64,
+        rope_parameters={
+            "rope_type": "llama3",
+            "factor": 8.0,
+            "low_freq_factor": 1.0,
+            "high_freq_factor": 4.0,
+            "original_max_position_embeddings": 64,
+            "rope_theta": 500_000.0,
+            "partial_rotary_factor": 0.5,
+        },
+    )
+
+    applied = apply_long_context_config(config, 256, "linear")
+
+    assert applied == {
+        "rope_theta": 500_000.0,
+        "partial_rotary_factor": 0.5,
+        "rope_type": "linear",
+        "factor": 4.0,
+    }
+    assert config.rope_parameters == applied
+    assert config.max_position_embeddings == 256

@@ -24,6 +24,11 @@ from typing import Any
 # Supported RoPE scaling methods (v0.49.0 adds "llama3").
 ROPE_SCALING_TYPES = ("linear", "dynamic", "yarn", "longrope", "llama3")
 
+# Values that remain meaningful when switching from one RoPE algorithm to
+# another. Algorithm-specific keys (for example Llama 3 frequency bands) must
+# not leak into the replacement block.
+_ROPE_TYPE_AGNOSTIC_KEYS = ("rope_theta", "partial_rotary_factor")
+
 # Default context lengths for known model families.
 MODEL_DEFAULT_CONTEXT: dict[str, int] = {
     "llama-3": 8192,
@@ -403,6 +408,15 @@ def apply_long_context_config(
     if not isinstance(existing, Mapping):
         existing = getattr(model_config, "rope_scaling", None)
     existing = dict(existing) if isinstance(existing, Mapping) else {}
+    nested_sections = sorted(
+        str(name) for name, value in existing.items() if isinstance(value, Mapping)
+    )
+    if nested_sections:
+        raise ValueError(
+            "nested rope_parameters are not supported safely; model-specific "
+            f"sections found: {', '.join(nested_sections)}. Soup refuses to "
+            "change max_position_embeddings without scaling every RoPE section"
+        )
     if rope_scaling_type is None:
         if isinstance(existing, Mapping) and detect_llama3_rope_in_config(
             {"rope_scaling": existing}
@@ -431,8 +445,11 @@ def apply_long_context_config(
             )
         rope_config["short_factor"] = existing["short_factor"]
         rope_config["long_factor"] = existing["long_factor"]
-    merged = existing
-    merged.pop("type", None)
+    merged = {
+        name: existing[name]
+        for name in _ROPE_TYPE_AGNOSTIC_KEYS
+        if name in existing and existing[name] is not None
+    }
     merged.update(rope_config)
     model_config.rope_parameters = merged
     model_config.max_position_embeddings = target_length
