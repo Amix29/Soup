@@ -121,8 +121,8 @@ def build_lora_config_kwargs(
         "use_dora": lora_cfg.use_dora,
         "use_rslora": lora_cfg.use_rslora,
     }
-    rank_pattern = getattr(lora_cfg, "rank_pattern", None)
-    alpha_pattern = getattr(lora_cfg, "alpha_pattern", None)
+    rank_pattern = lora_cfg.rank_pattern
+    alpha_pattern = lora_cfg.alpha_pattern
     if rank_pattern:
         kwargs["rank_pattern"] = dict(rank_pattern)
     if alpha_pattern:

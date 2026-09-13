@@ -738,6 +738,8 @@ def _drive_qwen4_streaming_setup(tmp_path, monkeypatch, resolve_weights=None):
             target_modules=["q_proj"],
             use_dora=False,
             use_rslora=False,
+            rank_pattern=None,
+            alpha_pattern=None,
         ),
     )
     model_cfg = types.SimpleNamespace(
