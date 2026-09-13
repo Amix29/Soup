@@ -318,7 +318,34 @@ class PretrainTrainerWrapper:
         if quant_config_obj is not None:
             model_kwargs["quantization_config"] = quant_config_obj
 
+        rope_config = None
+        if tcfg.rope_scaling_type:
+            from transformers import AutoConfig
+
+            from soup_cli.utils.long_context import apply_long_context_config
+
+            model_config = AutoConfig.from_pretrained(
+                cfg.base, trust_remote_code=self._trust_remote_code
+            )
+            rope_config = apply_long_context_config(
+                model_config,
+                target_length=cfg.data.max_length,
+                rope_scaling_type=tcfg.rope_scaling_type,
+                model_name=cfg.base,
+                yarn_factor=tcfg.yarn_factor,
+                yarn_attn_factor=tcfg.yarn_attn_factor,
+                yarn_beta_fast=tcfg.yarn_beta_fast,
+                yarn_beta_slow=tcfg.yarn_beta_slow,
+            )
+            if rope_config:
+                model_kwargs["config"] = model_config
+
         self.model = AutoModelForCausalLM.from_pretrained(cfg.base, **model_kwargs)
+        if rope_config:
+            console.print(
+                f"[green]Long-context enabled:[/] RoPE {tcfg.rope_scaling_type} "
+                f"scaling to {cfg.data.max_length} tokens"
+            )
 
         # MoE aux loss for load balancing
         is_moe = detect_moe_model(self.model)
