@@ -608,7 +608,7 @@ Use with `data.format: pre_tokenized` and `data.tokenized_path: ./.soup-tokenize
 
 Soup speaks the same dataset surface as Axolotl + LlamaFactory + Unsloth — remote URIs, streaming, sharding, multi-dataset interleaving, vocab expansion, and document ingestion all live in one schema.
 
-**Remote datasets** (schema gate live; fsspec backend wiring lands in v0.42.1):
+**Remote datasets** are loaded through the matching fsspec backend:
 
 ```yaml
 data:
@@ -940,7 +940,7 @@ Re-apply a previously written recipe:
 soup data mix --apply mix_recipe.yaml
 ```
 
-Live wiring of the proxy training loop into a short `soup train` run is the v0.48.1 deliverable; v0.48.0 ships a synthetic offline proxy (quadratic penalty around the uniform simplex) so the budget tracker, optimiser surface, and recipe writer can be exercised without GPUs. `scikit-optimize` is opt-in via `OptimizerProtocol`; the default fallback is a deterministic Dirichlet sampler.
+Pass `--live --base-yaml soup.yaml` to score each candidate with a short `soup train` proxy run. Without `--live`, Soup uses a synthetic offline proxy (quadratic penalty around the uniform simplex) so the budget tracker, optimiser surface, and recipe writer can be exercised without GPUs. `scikit-optimize` is opt-in via `OptimizerProtocol`; the default fallback is a deterministic Dirichlet sampler.
 
 
 ## AOT Tokenization with `soup data preprocess`

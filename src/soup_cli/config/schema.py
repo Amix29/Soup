@@ -647,9 +647,8 @@ class DataConfig(BaseModel):
     prompt_strategy: Optional[str] = Field(
         default=None,
         description=(
-            "Axolotl-style 'module.path:function_name' Python transform. "
-            "Schema-only in v0.42.0 — runtime invocation lands in v0.42.1. "
-            "(v0.42.0 Part E)"
+            "Axolotl-style 'module.path:function_name' Python transform, "
+            "resolved lazily and applied to each row during SFT formatting."
         ),
     )
     # ---- v0.61.0 Part A — Unlearning data sources --------------------------
@@ -1126,7 +1125,7 @@ class TrainingConfig(BaseModel):
             "aqlm (extreme 2-bit), eetq (8-bit fast), "
             "mxfp4 (BNB 4-bit MXFP4 quant_type), "
             "fp8 (load FP8 checkpoint with dequantize-on-load), "
-            "bitnet_1.58 (BitNet ternary, v0.52.0 schema-only)."
+            "bitnet_1.58 (reserved until BitNet trainer routing is available)."
         ),
     )
     gptq_disable_exllama: bool = Field(
@@ -1185,8 +1184,7 @@ class TrainingConfig(BaseModel):
         default=None, ge=1, le=64,
         description=(
             "LLaMA Pro: append N zero-init transformer blocks and freeze "
-            "the original ones. Schema lands in v0.41.0 — full live wiring "
-            "deferred to v0.41.1."
+            "the original ones before SFT or pre-training."
         ),
     )
     freeze_trainable_layers: Optional[int] = Field(
@@ -1491,8 +1489,8 @@ class TrainingConfig(BaseModel):
         description=(
             "GRPO objective variant: standard | gspo | dapo | dr_grpo | "
             "bnpo | two_sided | rft. Defaults to None (legacy GRPO). "
-            "Requires task='grpo'. Live wiring for v0.50.0 additions is "
-            "deferred to v0.50.1 (schema gate only)."
+            "Requires task='grpo'; the selected loss is installed by the "
+            "GRPO trainer."
         ),
     )
     grpo_delta: Optional[float] = Field(
@@ -1508,10 +1506,8 @@ class TrainingConfig(BaseModel):
     grpo_fp16: bool = Field(
         default=False,
         description=(
-            "Force FP16 mixed precision for GRPO/RL. Soup currently has "
-            "FP8 RL support; this flag is the explicit FP16 opt-in (unsloth "
-            "parity). v0.50.0: schema-only; live mixed-precision routing "
-            "deferred to v0.50.1."
+            "Force FP16 mixed precision for GRPO/RL (unsloth parity). "
+            "The GRPO trainer forwards fp16=True and bf16=False."
         ),
     )
     # v0.50.0 Part B — Long-context + memory-efficient RL
@@ -1519,9 +1515,9 @@ class TrainingConfig(BaseModel):
         default=False,
         description=(
             "Enable long-context GRPO (unsloth: 380K B200 / 110K H100). "
-            "Wires Tiled MLP from v0.56.0 Part A; schema-only in v0.50.0. "
-            "Requires task='grpo' on a non-mlx backend and "
-            "use_ring_attention=False (both rewrite attention)."
+            "Compatibility validation only: no trainer consumes this flag "
+            "yet. Requires task='grpo' on a non-mlx backend and "
+            "use_ring_attention=False."
         ),
     )
     vllm_sleep_mode: bool = Field(
@@ -1529,8 +1525,8 @@ class TrainingConfig(BaseModel):
         description=(
             "Enable vLLM sleep/standby between rollouts (memory savings "
             "during the optimisation step). Requires backend in "
-            "{transformers, unsloth}. Schema-only in v0.50.0; live wiring "
-            "in v0.50.1."
+            "{transformers, unsloth}; forwarded to compatible TRL and vLLM "
+            "runtimes by the GRPO trainer."
         ),
     )
     # v0.50.0 Part C — Multi-turn agent rollout backend (live v0.71.21 #125)
@@ -1640,8 +1636,8 @@ class TrainingConfig(BaseModel):
             "Enable Vision RL / VLM RL — extends GRPO/PPO to vision "
             "modality (Qwen2-VL / Pixtral / InternVL). Requires "
             "modality='vision', task in {grpo, ppo}, backend in "
-            "{transformers, unsloth}. Schema-only in v0.50.0; live VLM-RL "
-            "rollout wiring deferred to v0.50.1."
+            "{transformers, unsloth}. Compatibility validation is available, "
+            "but no trainer consumes this flag yet."
         ),
     )
     # v0.51.0 Part E — alternative model hubs (ModelScope / Modelers)
@@ -1650,8 +1646,8 @@ class TrainingConfig(BaseModel):
         description=(
             "Model hub for downloads + pushes. 'hf' (default), 'modelscope' "
             "(China-hosted; mirrors most Llama/Qwen/etc.), 'modelers' "
-            "(Openmind hub). Schema-only in v0.51.0; live downloader / "
-            "uploader wiring deferred to v0.51.1."
+            "(Openmind hub). Each backend is resolved lazily through its "
+            "matching download and upload adapter."
         ),
     )
 
@@ -1663,8 +1659,8 @@ class TrainingConfig(BaseModel):
         default=None,
         description=(
             "TTS model family — required when task='tts'. One of: orpheus, "
-            "sesame_csm, llasa, spark, oute. Schema-only in v0.52.0; live "
-            "trainer wrapper deferred to v0.52.1."
+            "sesame_csm, llasa, spark, oute. Selects the family-specific "
+            "codec and trainer preparation path."
         ),
     )
     tts_emotion: Optional[str] = Field(
@@ -1727,8 +1723,8 @@ class TrainingConfig(BaseModel):
         default=None,
         description=(
             "Teacher model HF id or local path — required when task='distill'. "
-            "Null-byte rejected, capped at 512 chars. Schema-only in v0.52.0; "
-            "live distill trainer deferred to v0.52.1."
+            "Loaded frozen by the distillation trainer. Null-byte rejected, "
+            "capped at 512 chars."
         ),
     )
     distill_divergence: Optional[Literal[
@@ -1775,8 +1771,8 @@ class TrainingConfig(BaseModel):
     ebft_variant: Optional[Literal["structured", "strided"]] = Field(
         default=None,
         description=(
-            "Energy-Based FT variant. SFT-task-only; live loss kernel "
-            "deferred to v0.52.1. (v0.52.0)"
+            "Energy-Based FT variant. SFT-task-only; replaces the trainer's "
+            "loss with the selected energy-based objective."
         ),
     )
     ebft_temperature: Optional[float] = Field(
@@ -1791,8 +1787,8 @@ class TrainingConfig(BaseModel):
     ]] = Field(
         default=None,
         description=(
-            "Generalized DPO variant. DPO-family-task-only; live loss kernel "
-            "deferred to v0.52.1. (v0.52.0)"
+            "Generalized DPO variant. DPO-family-task-only; replaces the "
+            "trainer's preference loss with the selected objective."
         ),
     )
     # Part F — MoE expert quantization + router-only training
@@ -1814,9 +1810,8 @@ class TrainingConfig(BaseModel):
     reasoning_effort: Optional[Literal["low", "medium", "high"]] = Field(
         default=None,
         description=(
-            "gpt-oss train-time reasoning effort level. Routes through a "
-            "prompt prefix at training time; live formatter wiring deferred "
-            "to v0.52.1. (v0.52.0)"
+            "gpt-oss train-time reasoning effort level. Injected as a prompt "
+            "prefix by the SFT-family data formatter."
         ),
     )
     train_on_eot: bool = Field(
@@ -1833,7 +1828,8 @@ class TrainingConfig(BaseModel):
         default=None,
         description=(
             "KV-cache element type for inference (q8_0 / bf16 / f16 / fp8). "
-            "Schema-only in v0.53.0; live wiring deferred to v0.53.1."
+            "Applied by soup serve on the transformers backend; backend and "
+            "hardware compatibility are validated before model loading."
         ),
     )
     # Part D — Train-time advanced precision.
@@ -1842,14 +1838,15 @@ class TrainingConfig(BaseModel):
         description=(
             "Extend the v0.28.0 FP8 menu to FP8 attention "
             "(axolotl-parity flag). Requires quantization_aware='fp8'. "
-            "Schema-only in v0.53.0; live wiring deferred to v0.53.1."
+            "Compatible trainer paths convert attention projections through "
+            "the shared advanced-precision setup."
         ),
     )
     nvfp4: bool = Field(
         default=False,
         description=(
-            "Blackwell-only NVFP4 training (unsloth + axolotl). "
-            "Schema-only in v0.53.0; live wiring deferred to v0.53.1."
+            "Blackwell-only NVFP4 training (unsloth + axolotl). Compatible "
+            "trainer paths apply torchao NVFP4 conversion before training."
         ),
     )
     unsloth_bnb_4bit: bool = Field(
@@ -1914,7 +1911,7 @@ class TrainingConfig(BaseModel):
         description=(
             "Enable RAGEN-style echo-trap detection during multi-turn "
             "agent RL. Requires task in {'grpo', 'ppo'} on a non-mlx "
-            "backend. Schema-only in v0.70.0; live callback in v0.70.1."
+            "backend; installs the shared RL signal callback."
         ),
     )
     echo_trap_threshold: float = Field(
@@ -1951,8 +1948,8 @@ class TrainingConfig(BaseModel):
         description=(
             "Save an RL-aware mid-epoch checkpoint every N steps. None "
             "= use HF Trainer's per-epoch checkpoint only. Requires "
-            "task in {'grpo', 'ppo'}. Schema-only in v0.70.0; live "
-            "save_state / load_state in v0.70.1."
+            "task in {'grpo', 'ppo'}; the callback persists trainer, "
+            "optimizer, scheduler, RNG, and optional rollout state."
         ),
     )
     rl_checkpoint_keep_last: int = Field(
@@ -1994,8 +1991,8 @@ class TrainingConfig(BaseModel):
         default=False,
         description=(
             "Enable MiniLLM-style on-policy distillation (Gu et al. 2024). "
-            "Requires task='distill' on a non-mlx backend. v0.70.0 "
-            "schema-only; live callback in v0.70.1."
+            "Requires task='distill' on a non-mlx backend; installs the "
+            "teacher-mixed sampling and reverse-KL loss path."
         ),
     )
     minillm_teacher_mix_ratio: float = Field(
@@ -2091,8 +2088,8 @@ class TrainingConfig(BaseModel):
             "Reward-hacking detector for GRPO/PPO. 'info_rm' tracks "
             "InfoRM cluster-separation across training; 'rm_ensemble' "
             "tracks pairwise variance across an RM ensemble. Requires "
-            "task in {'grpo', 'ppo'} on a non-mlx backend. Schema-only "
-            "in v0.70.0; live HF Trainer callback wired in v0.70.1."
+            "task in {'grpo', 'ppo'} on a non-mlx backend; installs the "
+            "shared reward-signal callback."
         ),
     )
     reward_hack_halt: bool = Field(
@@ -2804,9 +2801,9 @@ class TrainingConfig(BaseModel):
     use_longlora: bool = Field(
         default=False,
         description=(
-            "Enable LongLoRA S² shifted-sparse attention (v0.49.0, schema-only). "
-            "Requires task=sft, backend=transformers, Llama-family base. "
-            "Mutually exclusive with use_ring_attention."
+            "Enable the LongLoRA S² shifted-sparse attention override. "
+            "Requires task=sft, backend=transformers, a supported decoder "
+            "architecture, and use_ring_attention=false."
         ),
     )
     gradient_checkpointing: Union[
@@ -3013,8 +3010,8 @@ class TrainingConfig(BaseModel):
         default=False,
         description=(
             "Monitor VRAM each step; warn (and recommend new batch/accum) "
-            "when memory pressure is high. Advisory in v0.32.0; live "
-            "DataLoader rebuild deferred to v0.32.1."
+            "when memory pressure is high. Advisory only: it does not rebuild "
+            "the DataLoader or change accumulation during a run."
         ),
     )
     grad_accum_pressure_threshold: float = Field(
@@ -3770,8 +3767,7 @@ class TrainingConfig(BaseModel):
             "Unlearning method backend — required when task='unlearn'. "
             "npo (Negative Preference Optimization, DPO-shaped negative-only "
             "loss); simnpo (length-normalised NPO without ref model); rmu "
-            "(Representation Misdirection Unlearning, residual-stream noise). "
-            "Schema-only in v0.61.0; live trainer deferred to v0.61.1."
+            "(Representation Misdirection Unlearning, residual-stream noise)."
         ),
     )
     unlearn_alpha: Optional[float] = Field(
@@ -3861,16 +3857,16 @@ class TrainingConfig(BaseModel):
         description=(
             "Opt INTO citation-precision / recall scoring + a loss-mask "
             "rule that emphasises citation spans. Requires "
-            "`data.format='raft'`. Schema-only in v0.62.0; live span-mask "
-            "ships in v0.62.1. (v0.62.0 Part D)"
+            "`data.format='raft'`; SFT and RAFT trainers apply the weighted "
+            "citation-span mask."
         ),
     )
     citation_style: Optional[Literal["bracket", "inline", "footnote"]] = Field(
         default=None,
         description=(
             "Citation rendering style. 'bracket' = `[doc-1]` inline tag "
-            "(canonical RAFT default); 'inline' / 'footnote' are stub "
-            "placeholders for v0.62.1. (v0.62.0 Part D)"
+            "(canonical RAFT default), 'inline' = `(doc-1)`, and 'footnote' "
+            "= `[^doc-1]`. Used by citation scoring and span masking."
         ),
     )
     citation_recall_threshold: Optional[float] = Field(
@@ -3908,8 +3904,8 @@ class TrainingConfig(BaseModel):
         description=(
             "Opt INTO the GRACE codebook — discrete latent-space (key, "
             "value) store for thousands of sequential knowledge edits "
-            "without norm-blowup. Schema-only in v0.62.0; live lookup / "
-            "write ships in v0.62.1. (v0.62.0 Part E)"
+            "without norm-blowup. Knowledge editing performs live codebook "
+            "lookup and transactional writes."
         ),
     )
     grace_codebook_size: Optional[int] = Field(
@@ -4283,10 +4279,7 @@ class SoupConfig(BaseModel):
     )
     advise: Optional[AdviseConfig] = Field(
         default=None,
-        description=(
-            "Pre-flight decision settings consumed by `soup advise` "
-            "(v0.54.0 — schema-only on SoupConfig)."
-        ),
+        description="Pre-flight decision settings consumed by `soup advise`.",
     )
 
     @field_validator("experiment_name")
