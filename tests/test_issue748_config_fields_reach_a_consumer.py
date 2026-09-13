@@ -90,6 +90,12 @@ SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "soup_cli"
 SCHEMA = "schema.py"
 SCHEMA_PATH = SRC / "config" / SCHEMA
 
+# The detector's namespace is global. This one collision is proven unrelated:
+# commands/ship.py has a CLI argument with the same name, but never reads
+# TrainingConfig.forgetting_threshold. Keep the exception field-qualified so a
+# future DataConfig field of the same name is not laundered too.
+UNRELATED_NAME_COLLISIONS = frozenset({"training.forgetting_threshold"})
+
 
 # --------------------------------------------------------------------------
 # The detector. Kept here rather than in `src/` because it is test-only
@@ -223,6 +229,11 @@ def _consumer_modules():
     return [p for p in SRC.rglob("*.py") if p.name != SCHEMA]
 
 
+def field_reaches_a_consumer(key: str, attr: str, consumed: set) -> bool:
+    """Apply the field-qualified exceptions to the global consumed namespace."""
+    return attr in consumed and key not in UNRELATED_NAME_COLLISIONS
+
+
 def _consumed_in_src() -> set:
     """Cached: the walk is 499 modules and ~2s, and this file did it four
     times uncached. Keyed on the file list so a changed tree re-walks.
@@ -238,8 +249,9 @@ def _consumed_in_src() -> set:
 # --------------------------------------------------------------------------
 # Fields with no consumer today. Each entry is a promise that someone looked.
 #
-# Seeded so this lands green; the number may only shrink. Removing an entry
-# because the field was wired is the point. Adding one requires a reason.
+# Seeded so this lands green; the number normally shrinks as fields are wired.
+# A detector repair can expose a pre-existing orphan hidden by a name collision;
+# adding that field requires a tracked reason and a deliberate count update.
 # --------------------------------------------------------------------------
 KNOWN_UNCONSUMED = {
     # -- documented with a worked example, applied nowhere. Verified by hand.
@@ -288,13 +300,15 @@ KNOWN_UNCONSUMED = {
     "training.yarn_beta_slow": "no issue yet -- YaRN staging",
     "training.convergence_window": "no issue yet -- convergence-detector staging",
     "training.convergence_rel_tol": "no issue yet -- convergence-detector staging",
-    "training.forgetting_eval_steps": "no issue yet -- catastrophic-forgetting probe staging",
-    "training.forgetting_benchmark": "no issue yet -- catastrophic-forgetting probe staging",
-    "training.forgetting_stop": "no issue yet -- catastrophic-forgetting probe staging",
-    "training.checkpoint_eval_steps": "no issue yet -- checkpoint-eval staging",
-    "training.checkpoint_eval_metric": "no issue yet -- checkpoint-eval staging",
-    "training.checkpoint_eval_tasks": "no issue yet -- checkpoint-eval staging",
-    "training.checkpoint_keep_top": "no issue yet -- checkpoint-eval staging",
+    "training.forgetting_eval_steps": "#799 -- catastrophic-forgetting probe staging",
+    "training.forgetting_threshold": "#799 -- staged catastrophic-forgetting threshold; "
+                                     "the same name in ship.py is unrelated",
+    "training.forgetting_benchmark": "#799 -- catastrophic-forgetting probe staging",
+    "training.forgetting_stop": "#799 -- catastrophic-forgetting probe staging",
+    "training.checkpoint_eval_steps": "#799 -- checkpoint-eval staging",
+    "training.checkpoint_eval_metric": "#799 -- checkpoint-eval staging",
+    "training.checkpoint_eval_tasks": "#799 -- checkpoint-eval staging",
+    "training.checkpoint_keep_top": "#799 -- checkpoint-eval staging",
     "training.grace_codebook_size": "no issue yet -- GRACE codebook staging",
     "training.grace_codebook_dim": "no issue yet -- GRACE codebook staging",
     "data.video_dir": "no issue yet -- video pipeline staging",
@@ -404,7 +418,8 @@ class TestEveryDeclaredFieldReachesAConsumer:
         orphans = sorted(
             key
             for key, attr in _declared().items()
-            if attr not in consumed and key not in KNOWN_UNCONSUMED
+            if not field_reaches_a_consumer(key, attr, consumed)
+            and key not in KNOWN_UNCONSUMED
         )
         assert not orphans, (
             "These config fields are declared in schema.py and read by no "
@@ -431,7 +446,7 @@ class TestEveryDeclaredFieldReachesAConsumer:
         declared = _declared()
         now_wired = sorted(
             k for k in KNOWN_UNCONSUMED
-            if k in declared and declared[k] in consumed
+            if k in declared and field_reaches_a_consumer(k, declared[k], consumed)
         )
         assert not now_wired, (
             "These fields now have a consumer, so their KNOWN_UNCONSUMED entry "
@@ -458,7 +473,8 @@ class TestEveryDeclaredFieldReachesAConsumer:
         consumed = _consumed_in_src()
         orphans = [
             key for key, attr in _declared().items()
-            if attr not in consumed and key not in KNOWN_UNCONSUMED
+            if not field_reaches_a_consumer(key, attr, consumed)
+            and key not in KNOWN_UNCONSUMED
         ]
         assert "training.totally_unwired_probe" in orphans, (
             f"the guard did not flag an unwired field; it reported {orphans}. "
@@ -474,7 +490,8 @@ class TestEveryDeclaredFieldReachesAConsumer:
         assert "totally_unwired_probe" in consumed_after
         assert not [
             key for key, attr in _declared().items()
-            if attr not in consumed_after and key not in KNOWN_UNCONSUMED
+            if not field_reaches_a_consumer(key, attr, consumed_after)
+            and key not in KNOWN_UNCONSUMED
         ]
 
     def test_removing_a_fields_last_consumer_is_caught(self, tmp_path):
@@ -511,8 +528,8 @@ def test_the_allowlist_size_is_pinned_exactly():
     half: it names WHICH entry went stale, where this one only says the count
     moved.
     """
-    assert len(KNOWN_UNCONSUMED) == 39, (
-        f"KNOWN_UNCONSUMED is {len(KNOWN_UNCONSUMED)}, pinned at 39. Going UP "
+    assert len(KNOWN_UNCONSUMED) == 40, (
+        f"KNOWN_UNCONSUMED is {len(KNOWN_UNCONSUMED)}, pinned at 40. Going UP "
         "means a field was allowlisted rather than wired; going DOWN means an "
         "entry was retired, which is the good direction -- lower this number "
         "in the same commit."
