@@ -129,6 +129,31 @@ def test_yaml_body_cap_runs_before_json_parsing(
     assert oversized_response.status_code == 413
 
 
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "/api/config/validate",
+        "/api/train/start",
+        "/api/config/from-form",
+    ],
+)
+def test_yaml_routes_keep_the_1mib_ceiling_not_the_8kib_one(
+    ui_client: tuple[object, dict[str, str]],
+    endpoint: str,
+) -> None:
+    """Bodies well above 8 KiB but below 1 MiB must still reach parsing."""
+    client, auth_headers = ui_client
+    body = b'{"unterminated":"' + (b"x" * (900 * 1024))
+
+    response = client.post(  # type: ignore[attr-defined]
+        endpoint,
+        content=body,
+        headers={**auth_headers, "Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 422
+
+
 def test_oversized_content_length_rejects_without_reading_body() -> None:
     """The header fast path must stop before the first receive call."""
     from soup_cli.ui.app import _RequestBodySizeLimitMiddleware
