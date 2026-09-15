@@ -265,6 +265,7 @@
     "training.stream_layers": false,
     "training.stream_ngram_source": "auto",
     "training.stream_pin": null,
+    "training.stream_read_ahead": 2,
     "training.stream_source": "auto",
     "training.stream_vram_override": null,
     "training.stream_vram_probe": false,
@@ -1799,6 +1800,20 @@
       "training.lora.alpha": 32,
       "training.lora.r": 16,
       "training.lr": 5e-06,
+      "training.moe_lora": true
+    },
+    "qwen3.5-35b-a3b-grpo": {
+      "base": "Qwen/Qwen3.5-35B-A3B",
+      "data.format": "auto",
+      "data.max_length": 4096,
+      "data.train": "./data/reasoning_train.jsonl",
+      "task": "grpo",
+      "training.batch_size": 1,
+      "training.gradient_accumulation_steps": 16,
+      "training.gradient_checkpointing": true,
+      "training.lora.alpha": 32,
+      "training.lora.r": 16,
+      "training.lr": 1e-05,
       "training.moe_lora": true
     },
     "qwen3.5-35b-a3b-sft": {

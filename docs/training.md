@@ -284,9 +284,12 @@ soup train --config soup.yaml --uld-strategy wasserstein
 #   training:
 #     uld_strategy: wasserstein_aligned
 
-# MiniLLM reverse-KL on-policy distillation — bundles 3 stability tricks
-# (Gu et al. 2024 arXiv:2306.08543). Config-only: there is no --minillm-*
-# flag beyond --minillm-on-policy below (#979).
+# MiniLLM reverse-KL distillation (Gu et al. 2024 arXiv:2306.08543).
+# Config-only: there is no --minillm-* flag beyond --minillm-on-policy below
+# (#979). Offline blend: mix ratio is the teacher weight in the reverse-KL
+# target and must be > 0 (ratio 0 is KL(student || stopgrad(student)) and is
+# rejected). On-policy: mix 0 is legal — student-only sampling, loss still
+# KL(student || teacher).
 #   training:
 #     minillm_enabled: true
 #     minillm_teacher_mix_ratio: 0.3
@@ -297,8 +300,9 @@ soup train --config soup.yaml
 # MiniLLM TRUE on-policy rollout (v0.71.18, Gu et al. §3.1) — sample a fresh
 # autoregressive rollout from the per-token teacher/student mixture each step,
 # then length-normalised reverse-KL. training.minillm_rollout_length tunes the
-# rollout (auto min(max_length, 32)). --minillm-on-policy is the one real flag
-# here; minillm_enabled: true still has to be set in the config (#979).
+# rollout (auto min(max_length, 32)). Mix 0 here means student-only sampling.
+# --minillm-on-policy is the one real flag here; minillm_enabled: true still
+# has to be set in the config (#979).
 soup train --config soup.yaml --minillm-on-policy
 
 # Mid-epoch checkpoint for PPO/GRPO — TorchTune punts this; Soup ships it
@@ -1122,22 +1126,24 @@ soup reward stress verifiable --verifiable-domain json_schema \
 
 # tune the attack set / accept threshold / gameability tolerance
 soup reward stress reward.py --references golds.jsonl \
-    --attacks empty,length,repetition,sentinel --sentinel GOLD \
-    --threshold 0.5 --max-gameable 0.0
+    --attacks empty,length,repetition,sentinel,wrapped_junk,answer_spray \
+    --sentinel GOLD --threshold 0.5 --max-gameable 0.0
 ```
 
 The report shows a per-attack accept-rate and an overall verdict. A gold-requiring verifier probed
-with **no** `--references` is a hard error (it can't be measured), never a false "robust". Probing a
-`.py` executes its module code, like any custom reward — only stress files you trust.
+with **no** `--references` is a hard error (it can't be measured), never a false "robust". Because
+each attack family evaluates multiple distinct variants across sampled references (up to 23 batched
+verifier invocations, or 4,600 scored completions at the 200-gold cap), slow or model-based verifiers
+will take proportionally longer than simple string checks. Probing a `.py` executes its module code,
+like any custom reward — only stress files you trust.
 For the builtin `json_schema` domain, references are forwarded as `schema=` metadata; JSON objects
 selected by `--field` are decoded before the verifier scores them.
 
-Current limitation: the four built-in attack families emit plain text that is not valid JSON, so
+Current limitation: the built-in attack families emit plain text that is not valid JSON, so
 `json_schema` rejects them during parsing before schema-specific constraints are evaluated. The
-result therefore does not yet distinguish a strict schema from a permissive one; structure-
-preserving JSON attacks are tracked in #918. Its `reference_accept` value is also not a meaningful
-self-acceptance control for this domain because it scores the schema document as though it were an
-instance of itself (and is normally `0%`).
+result therefore does not yet distinguish a strict schema from a permissive one. Its `reference_accept`
+value is also not a meaningful self-acceptance control for this domain because it scores the schema
+document as though it were an instance of itself (and is normally `0%`).
 
 ### Verifiable Rewards (RLVR)
 
