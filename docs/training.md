@@ -285,17 +285,21 @@ soup train --config soup.yaml --uld-strategy wasserstein
 #     uld_strategy: wasserstein_aligned
 
 # MiniLLM reverse-KL on-policy distillation — bundles 3 stability tricks
-# (Gu et al. 2024 arXiv:2306.08543)
-soup train --config soup.yaml --minillm-enabled \
-    --minillm-teacher-mix-ratio 0.3 \
-    --minillm-pretrain-anchor-weight 0.1 \
-    --minillm-pretrain-anchor-path ./pretrain.jsonl
+# (Gu et al. 2024 arXiv:2306.08543). Config-only: there is no --minillm-*
+# flag beyond --minillm-on-policy below (#979).
+#   training:
+#     minillm_enabled: true
+#     minillm_teacher_mix_ratio: 0.3
+#     minillm_pretrain_anchor_weight: 0.1
+#     minillm_pretrain_anchor_path: ./pretrain.jsonl
+soup train --config soup.yaml
 
 # MiniLLM TRUE on-policy rollout (v0.71.18, Gu et al. §3.1) — sample a fresh
 # autoregressive rollout from the per-token teacher/student mixture each step,
 # then length-normalised reverse-KL. training.minillm_rollout_length tunes the
-# rollout (auto min(max_length, 32)).
-soup train --config soup.yaml --minillm-enabled --minillm-on-policy
+# rollout (auto min(max_length, 32)). --minillm-on-policy is the one real flag
+# here; minillm_enabled: true still has to be set in the config (#979).
+soup train --config soup.yaml --minillm-on-policy
 
 # Mid-epoch checkpoint for PPO/GRPO — TorchTune punts this; Soup ships it
 soup train --config grpo.yaml \
