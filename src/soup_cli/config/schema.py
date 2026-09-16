@@ -4531,6 +4531,28 @@ class SoupConfig(BaseModel):
         )
 
     @model_validator(mode="after")
+    def _validate_peft_variant_backend_and_quantization(self) -> "SoupConfig":
+        """Keep advertised PEFT variants on paths that actually implement them."""
+        lcfg = self.training.lora
+        variant = "vera" if lcfg.use_vera else lcfg.init_strategy
+        if variant == "random":
+            return self
+        if self.backend != "transformers":
+            raise ValueError(
+                f"training.lora variant {variant!r} requires backend='transformers'; "
+                f"backend={self.backend!r} has its own adapter constructor and cannot "
+                "apply this PEFT method. Use backend='transformers' or choose plain LoRA."
+            )
+        if variant == "loftq" and self.training.quantization != "none":
+            raise ValueError(
+                "training.lora.init_strategy='loftq' requires "
+                "training.quantization='none': PEFT LoftQ quantizes the base model "
+                "during adapter initialization, so passing an already quantized model "
+                f"({self.training.quantization!r}) is invalid."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _validate_chat_template_supported_tasks(self) -> "SoupConfig":
         """Reject chat-template overrides on trainers that never render chat."""
         unsupported = {
