@@ -133,7 +133,13 @@ training:
 - **`selective`** — attention only (~10% slowdown, modest save).
 - **`auto`** — pick based on detected VRAM: < 24 GB → full, 24-80 GB → medium, > 80 GB → selective.
 
-Legacy boolean configs continue to work unchanged.
+On SFT, `medium` uses Transformers' native `every_n_layers=2` path, while
+`selective` wraps each decoder block's direct attention module and leaves HF's
+full-model checkpointing off to avoid double recomputation. If an architecture
+does not expose a direct attention child, Soup reports and applies a `full`
+fallback instead of claiming an inactive selective tier. Other task wrappers
+currently treat any enabled tier as full checkpointing. Legacy boolean configs
+continue to work unchanged.
 
 
 ## Kernel Auto-Composition
