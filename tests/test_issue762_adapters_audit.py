@@ -707,6 +707,7 @@ class TestEverySettingCanActuallyDiverge:
     #: gradient_checkpointing is unset so the schema default False applies.
     DIVERGENT = [
         ("optimizer", {"optimizer": "SGD"}),
+        ("learning_rate", {"peak_lr": 2e-4}),
         ("scheduler", {"scheduler": "linear"}),
         ("warmup_ratio", {"warmup_updates": 7}),
         ("weight_decay", {"weight_decay": 0.5}),
