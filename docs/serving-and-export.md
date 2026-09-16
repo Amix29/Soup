@@ -212,6 +212,12 @@ This acts as a built-in "speedometer," outputting Tokens-Per-Second (TPS), Total
 
 ## Inference Server
 
+`--auto-quant` currently refuses with exit code 2. Soup cannot compare GGUF, AWQ,
+GPTQ, FP8, and an unquantized baseline before a serving engine has loaded them;
+timing an unevaluated stub would make the result depend on timer noise and could
+force a format the checkpoint does not contain. Quantize the checkpoint explicitly,
+then serve that checkpoint without `--auto-quant`.
+
 Start a local OpenAI-compatible inference server:
 
 ```bash

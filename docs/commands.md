@@ -68,6 +68,7 @@ soup serve --model ./output --backend sglang  SGLang backend
 soup serve --model ./output --backend mii     DeepSpeed-MII backend (live)
 soup serve --model ./output --speculative-decoding draft-model  Speculative decoding
 soup serve --model <m> --auto-spec            Auto-pair draft model for speculative decoding
+soup serve --model <m> --auto-quant           Refuses until candidates can be loaded and measured; quantize explicitly instead
 soup serve --model <m> --backend vllm --prefix-cache  vLLM prefix caching (RAG/agent)
 soup serve --model <m> --structured-output json --json-schema s.json  Constrained output
 soup serve --model <m> --structured-output regex --regex-pattern '...'  Regex-constrained output
