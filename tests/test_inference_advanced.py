@@ -842,9 +842,8 @@ class TestStructuredOutputExtra:
 
 
 class TestAutoQuantCLIWarning:
-    def test_auto_quant_logs_picker_choice(self, tmp_path):
-        """v0.33.0 #54: --auto-quant runs the live picker and logs the
-        chosen candidate (not a deferral warning anymore)."""
+    def test_auto_quant_refuses_before_model_loading(self, tmp_path):
+        """#816: the deprecated flag fails honestly before loading a model."""
         pytest.importorskip("fastapi")  # CLI exits early w/o FastAPI
         from typer.testing import CliRunner
 
@@ -865,10 +864,9 @@ class TestAutoQuantCLIWarning:
                 "--auto-quant",
             ],
         )
-        # Command will fail later (no real model); just check the picker
-        # ran (either picked a candidate or surfaced a controlled error).
         output = _strip_ansi(result.output).lower()
-        assert "auto-quant" in output
+        assert result.exit_code == 2
+        assert "--auto-quant is unavailable" in output
 
 
 class TestJsonSchemaContainment:
