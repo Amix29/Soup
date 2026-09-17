@@ -4543,6 +4543,13 @@ class SoupConfig(BaseModel):
                 f"backend={self.backend!r} has its own adapter constructor and cannot "
                 "apply this PEFT method. Use backend='transformers' or choose plain LoRA."
             )
+        if variant == "pissa" and self.training.quantization != "none":
+            raise ValueError(
+                "training.lora.init_strategy='pissa' requires "
+                "training.quantization='none': PEFT PiSSA computes an SVD of the "
+                "floating-point base weights during adapter initialization, so an "
+                f"already quantized base ({self.training.quantization!r}) is invalid."
+            )
         if variant == "loftq" and self.training.quantization != "none":
             raise ValueError(
                 "training.lora.init_strategy='loftq' requires "

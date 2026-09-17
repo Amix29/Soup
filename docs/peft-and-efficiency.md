@@ -211,9 +211,10 @@ Catch-all friendly errors: typos in `optimizer:` are rejected at config-load wit
 
 PiSSA, OLoRA, LoftQ, and VeRA are applied through the shared PEFT constructor on
 the Transformers backend. Soup refuses these variants on MLX and Unsloth rather
-than silently substituting ordinary LoRA. LoftQ additionally requires
-`quantization: none`: its PEFT initializer performs the low-bit conversion itself,
-so an already quantized base is invalid.
+than silently substituting ordinary LoRA. PiSSA and LoftQ additionally require
+`quantization: none`: PiSSA needs floating-point base weights for its SVD, while
+LoftQ performs the low-bit conversion itself, so an already quantized base is
+invalid for either initializer.
 
 On the Transformers backend, `target_modules: auto` has an explicit Qwen3.5-family
 fallback because PEFT does not yet map `qwen3_5_text`. Soup targets `q_proj` and
@@ -256,6 +257,7 @@ Five PEFT-surface improvements that LlamaFactory and Axolotl maintain:
 
 ```yaml
 training:
+  quantization: none            # required: PiSSA initializes from float weights
   lora:
     init_strategy: pissa          # 'random' (default), 'pissa', 'olora'
     rank_pattern:                 # per-target-module rank override

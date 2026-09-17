@@ -128,3 +128,15 @@ def test_loftq_refuses_prequantized_base() -> None:
             data={"train": "train.jsonl"},
             training={"lora": {"init_strategy": "loftq"}},
         )
+
+
+def test_pissa_refuses_prequantized_base() -> None:
+    from soup_cli.config.schema import SoupConfig
+
+    with pytest.raises(ValidationError, match="PiSSA computes an SVD"):
+        SoupConfig(
+            base="tiny-local-llama",
+            task="sft",
+            data={"train": "train.jsonl"},
+            training={"lora": {"init_strategy": "pissa"}},
+        )
