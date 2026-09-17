@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import inspect
+import json
 
 import pytest
 
@@ -18,6 +18,112 @@ def _tiny_llama():
         num_key_value_heads=2,
     )
     return transformers.LlamaForCausalLM(config)
+
+
+def _write_tiny_sft_assets(directory) -> str:
+    from tokenizers import Tokenizer, models, pre_tokenizers
+
+    model_dir = directory / "model"
+    model_dir.mkdir()
+    _tiny_llama().save_pretrained(model_dir)
+
+    vocab = {
+        "<unk>": 0,
+        "<s>": 1,
+        "</s>": 2,
+        "<pad>": 3,
+        "user": 4,
+        "assistant": 5,
+        "hello": 6,
+        "world": 7,
+    }
+    tokenizer = Tokenizer(models.WordLevel(vocab=vocab, unk_token="<unk>"))
+    tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+    tokenizer.save(str(model_dir / "tokenizer.json"))
+    (model_dir / "tokenizer_config.json").write_text(
+        json.dumps(
+            {
+                "tokenizer_class": "PreTrainedTokenizerFast",
+                "unk_token": "<unk>",
+                "bos_token": "<s>",
+                "eos_token": "</s>",
+                "pad_token": "<pad>",
+                "model_max_length": 64,
+                "clean_up_tokenization_spaces": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return str(model_dir)
+
+
+def _setup_real_sft(
+    tmp_path,
+    monkeypatch,
+    *,
+    tier: str,
+    quantization: str = "none",
+    memory_gb: int = 40,
+):
+    pytest.importorskip("peft")
+    pytest.importorskip("trl")
+    from soup_cli.config.schema import SoupConfig
+    from soup_cli.trainer.sft import SFTTrainerWrapper
+
+    model_dir = _write_tiny_sft_assets(tmp_path)
+    cfg = SoupConfig(
+        base=model_dir,
+        task="sft",
+        data={
+            "train": "train.jsonl",
+            "max_length": 64,
+            "chat_template": "chatml",
+        },
+        training={
+            "batch_size": 1,
+            "epochs": 1,
+            "logging_steps": 1,
+            "save_steps": 1000,
+            "quantization": quantization,
+            "gradient_checkpointing": tier,
+            "lora": {
+                "r": 4,
+                "alpha": 8,
+                "target_modules": ["q_proj", "v_proj"],
+            },
+        },
+        output=str(tmp_path / "out"),
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "soup_cli.utils.gpu.get_gpu_info",
+        lambda: {
+            "memory_total_bytes": memory_gb * 1024**3,
+            "name": "test-cpu",
+        },
+    )
+
+    if quantization == "4bit":
+        model = _tiny_llama()
+        model.is_loaded_in_4bit = True
+        monkeypatch.setattr(
+            "soup_cli.utils.quant_menu.build_quantization_config_for_loader",
+            lambda **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            "transformers.AutoModelForCausalLM.from_pretrained",
+            lambda *_args, **_kwargs: model,
+        )
+
+    wrapper = SFTTrainerWrapper(cfg, device="cpu")
+    row = {
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "world"},
+        ]
+    }
+    wrapper.setup({"train": [row, row]})
+    return wrapper
 
 
 def test_medium_uses_transformers_every_n_layers_and_skips_half_the_blocks() -> None:
@@ -117,10 +223,40 @@ def test_selective_falls_back_truthfully_when_architecture_has_no_attention_chil
     assert "full fallback" in plan.description
 
 
-def test_sft_setup_consumes_the_truthful_plan() -> None:
-    from soup_cli.trainer.sft import SFTTrainerWrapper
+@pytest.mark.parametrize(("tier", "memory_gb"), [("medium", 40), ("auto", 40)])
+def test_sft_setup_forwards_medium_plan_to_real_trainer(
+    tmp_path, monkeypatch, tier: str, memory_gb: int
+) -> None:
+    wrapper = _setup_real_sft(
+        tmp_path, monkeypatch, tier=tier, memory_gb=memory_gb
+    )
 
-    source = inspect.getsource(SFTTrainerWrapper.setup)
-    assert "plan_gradient_checkpointing(" in source
-    assert "training_kwargs.update(ckpt_plan.kwargs)" in source
-    assert "ckpt_plan.description" in source
+    assert wrapper.trainer.args.gradient_checkpointing is True
+    assert wrapper.trainer.args.gradient_checkpointing_kwargs == {
+        "use_reentrant": False,
+        "every_n_layers": 2,
+    }
+
+    wrapper.trainer.train()
+    layers = wrapper.trainer.model.get_base_model().model.layers
+    assert [layer.gradient_checkpointing for layer in layers] == [True, False, True, False]
+
+
+def test_sft_selective_disables_kbit_full_checkpointing_and_wraps_attention(
+    tmp_path, monkeypatch
+) -> None:
+    wrapper = _setup_real_sft(
+        tmp_path,
+        monkeypatch,
+        tier="selective",
+        quantization="4bit",
+        memory_gb=120,
+    )
+
+    model = wrapper.trainer.model
+    base = model.get_base_model()
+    assert model.is_gradient_checkpointing is False
+    assert wrapper.trainer.args.gradient_checkpointing is False
+    assert [layer.gradient_checkpointing for layer in base.model.layers] == [False] * 4
+    for layer in base.model.layers:
+        assert layer.self_attn.forward.__name__ == "_checkpointed_forward"

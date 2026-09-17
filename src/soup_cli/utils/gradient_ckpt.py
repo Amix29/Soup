@@ -222,6 +222,13 @@ def plan_gradient_checkpointing(
 
     hooked = install_selective_hooks(model, "selective")
     if hooked:
+        # PEFT's ``prepare_model_for_kbit_training`` enables native HF
+        # checkpointing before this plan runs. ``TrainingArguments(False)``
+        # does not undo that model-side state, which would otherwise make a
+        # selective run checkpoint both every decoder layer and its attention
+        # child. The selective hooks are now the sole checkpointing mechanism.
+        if getattr(model, "is_gradient_checkpointing", False):
+            model.gradient_checkpointing_disable()
         return GradientCheckpointingPlan(
             resolve_gradient_checkpointing("selective"),
             "selective",
