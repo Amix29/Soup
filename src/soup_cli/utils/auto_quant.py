@@ -4,7 +4,8 @@ There is deliberately no caller under :mod:`soup_cli`: ``soup serve
 --auto-quant`` refuses before loading a backend because Soup cannot compare
 quantization candidates until it has loaded and measured each candidate. Do
 not reconnect these timer-based helpers to serving; they remain only so older
-third-party imports fail gradually rather than at module import time.
+third-party imports keep working through v0.75.x. The compatibility module is
+scheduled for removal in v0.76.0.
 """
 
 from __future__ import annotations
