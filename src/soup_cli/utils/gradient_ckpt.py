@@ -118,7 +118,7 @@ def install_selective_hooks(model, granularity: str) -> int:
         granularity: one of ``"selective"`` / ``"medium"`` / ``"full"``.
 
     Returns:
-        Number of modules that received a hook. Zero is a meaningful signal
+        Number of modules that use a hook. Zero is a meaningful signal
         — caller should fall back to HF's native ``gradient_checkpointing``.
 
     Raises:
@@ -127,8 +127,8 @@ def install_selective_hooks(model, granularity: str) -> int:
     Notes:
         - Pure best-effort; the function never raises on a missing torch
           dependency at call site (it imports inside).
-        - We do NOT undo earlier hooks. The trainer wrapper is expected to
-          call this once per ``self.model`` instance before training starts.
+        - Existing Soup checkpoint wrappers are reused, so repeated planning
+          is idempotent and never nests one checkpoint inside another.
     """
     if granularity not in {"selective", "medium", "full"}:
         raise ValueError(
@@ -145,6 +145,8 @@ def install_selective_hooks(model, granularity: str) -> int:
     hooked = 0
 
     def _wrap(module):
+        if getattr(module.forward, "__name__", "") == "_checkpointed_forward":
+            return
         original_forward = module.forward
 
         def _checkpointed_forward(*args, **kwargs):

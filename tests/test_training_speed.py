@@ -818,7 +818,7 @@ class TestGradientCheckpointingResolver:
         # Low VRAM → full checkpointing
         assert kwargs["gradient_checkpointing"] is True
 
-    def test_resolve_auto_high_memory_selects_selective(self):
+    def test_resolve_auto_80gb_selects_medium(self):
         from soup_cli.utils.gradient_ckpt import resolve_gradient_checkpointing
 
         # 80GB resolves to medium (the selective threshold is strictly > 80).

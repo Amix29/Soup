@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 
 import pytest
 
@@ -188,6 +189,19 @@ def test_selective_wraps_one_attention_module_per_block_without_hf_checkpointing
         assert layer.self_attn.o_proj.forward.__name__ != "_checkpointed_forward"
 
 
+def test_selective_planning_is_idempotent() -> None:
+    from soup_cli.utils.gradient_ckpt import plan_gradient_checkpointing
+
+    model = _tiny_llama()
+    first = plan_gradient_checkpointing(model, "selective")
+    forwards = [layer.self_attn.forward for layer in model.model.layers]
+    second = plan_gradient_checkpointing(model, "selective")
+
+    assert first.hooked_modules == second.hooked_modules == 4
+    assert second.granularity == "selective"
+    assert [layer.self_attn.forward for layer in model.model.layers] == forwards
+
+
 def test_selective_tiny_model_completes_forward_and_backward() -> None:
     torch = pytest.importorskip("torch")
     from soup_cli.utils.gradient_ckpt import plan_gradient_checkpointing
@@ -260,3 +274,13 @@ def test_sft_selective_disables_kbit_full_checkpointing_and_wraps_attention(
     assert [layer.gradient_checkpointing for layer in base.model.layers] == [False] * 4
     for layer in base.model.layers:
         assert layer.self_attn.forward.__name__ == "_checkpointed_forward"
+
+    wrapper.trainer.train()
+    grad_norms = [
+        float(entry["grad_norm"])
+        for entry in wrapper.trainer.state.log_history
+        if "grad_norm" in entry
+    ]
+    assert grad_norms
+    assert all(math.isfinite(value) for value in grad_norms)
+    assert any(value > 0 for value in grad_norms)
