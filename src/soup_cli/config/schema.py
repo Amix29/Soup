@@ -4537,6 +4537,14 @@ class SoupConfig(BaseModel):
         variant = "vera" if lcfg.use_vera else lcfg.init_strategy
         if variant == "random":
             return self
+        if self.task == "moe_lora_routing":
+            raise ValueError(
+                f"training.lora variant {variant!r} is not applied by "
+                "task='moe_lora_routing': that trainer loads existing adapters "
+                "with PeftModel.from_pretrained instead of constructing a new "
+                "adapter. Choose plain defaults here and configure the adapters "
+                "through training.mole_task_adapters."
+            )
         if self.backend != "transformers":
             raise ValueError(
                 f"training.lora variant {variant!r} requires backend='transformers'; "

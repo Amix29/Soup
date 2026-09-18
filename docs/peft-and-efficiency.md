@@ -195,6 +195,9 @@ training:
     mlp:    1e-5
 
   # Friendly aliases for users coming from LlamaFactory / Axolotl
+  # load_in_8bit: true      # equivalent to quantization: 8bit
+  # load_in_16bit: true     # equivalent to quantization: none
+
   quantization: none        # required: PEFT LoftQ quantizes the base itself
 
   lora:
