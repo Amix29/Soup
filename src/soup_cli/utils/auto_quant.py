@@ -3,8 +3,10 @@
 There is deliberately no caller under :mod:`soup_cli`: ``soup serve
 --auto-quant`` refuses before loading a backend because Soup cannot compare
 quantization candidates until it has loaded and measured each candidate. Do
-not reconnect these timer-based helpers to serving; they remain only so older
-third-party imports fail gradually rather than at module import time.
+not reconnect these timer-based helpers to serving; they remain temporarily
+for import compatibility. The compatibility module is scheduled for removal
+at the release named by
+:data:`~soup_cli.config.deprecation.DEPRECATED_VALUE_REJECTION_VERSION`.
 """
 
 from __future__ import annotations
@@ -13,6 +15,11 @@ import math
 import re
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
+
+from soup_cli.config.deprecation import DEPRECATED_VALUE_REJECTION_VERSION
+
+# Keep the removal target tied to Soup's canonical deprecation deadline.
+_AUTO_QUANT_REMOVAL_VERSION = DEPRECATED_VALUE_REJECTION_VERSION
 
 _VALID_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 _DEFAULT_ORDER = ("gguf", "awq", "gptq", "fp8", "none")

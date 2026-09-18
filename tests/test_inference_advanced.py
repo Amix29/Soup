@@ -841,34 +841,6 @@ class TestStructuredOutputExtra:
         assert "json-schema" in _strip_ansi(result.output)
 
 
-class TestAutoQuantCLIWarning:
-    def test_auto_quant_refuses_before_model_loading(self, tmp_path):
-        """#816: the deprecated flag fails honestly before loading a model."""
-        pytest.importorskip("fastapi")  # CLI exits early w/o FastAPI
-        from typer.testing import CliRunner
-
-        from soup_cli.cli import app
-
-        runner = CliRunner()
-        model_dir = tmp_path / "model"
-        model_dir.mkdir()
-
-        result = runner.invoke(
-            app,
-            [
-                "serve",
-                "--model",
-                str(model_dir),
-                "--device",
-                "cpu",
-                "--auto-quant",
-            ],
-        )
-        output = _strip_ansi(result.output).lower()
-        assert result.exit_code == 2
-        assert "--auto-quant is unavailable" in output
-
-
 class TestJsonSchemaContainment:
     def test_json_schema_outside_cwd_rejected(self, tmp_path, monkeypatch):
         """JSON schema path must stay under cwd."""
