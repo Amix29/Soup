@@ -250,6 +250,9 @@ class DPOTrainerWrapper(StreamingSetupMixin):
 
             materialize_meta_adapter_copy(self.model)
 
+        if tcfg.stream_layers:
+            self._run_pending_stream_vram_probe()
+
         # #359 - the same exposure #336 fixed in sft.py: with LoRA the
         # no-decay optimizer group is empty, DeepSpeed drops it, and the LR
         # scheduler keeps two base_lrs until torch's strict zip raises at the
