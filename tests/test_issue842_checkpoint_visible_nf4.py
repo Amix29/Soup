@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import os
+import sys
+
 import pytest
 
 from soup_cli.utils.layer_stream_runtime import checkpoint_visible_nf4_linear
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 torch = pytest.importorskip("torch")
 bnb_functional = pytest.importorskip("bitsandbytes.functional")
@@ -147,3 +152,46 @@ def test_production_capability_gate_keeps_cpu_on_the_old_path():
     packed, state = bnb_functional.quantize_4bit(torch.randn(16, 16), quant_type="nf4")
     assert packed.device.type == "cpu"
     assert _can_use_checkpoint_visible_nf4_gemm(torch.randn(2, 16), state) is False
+
+
+def test_streamed_layer_caches_substitution_views_for_one_pool_mapping(
+    tmp_path, monkeypatch
+):
+    from test_v07202 import _nf4_stream
+
+    import soup_cli.utils.layer_stream_runtime as runtime_module
+
+    model, runtime, _, _, _ = _nf4_stream(tmp_path)
+    layer = runtime_module.decoder_owner(model).layers[0]
+    buffers = runtime.pool.buffers[runtime.pool.slot_for(layer.idx)]
+
+    # Start from a known-empty cache: model construction must not be what makes
+    # this test pass.
+    layer._cached_substitution_buffers = None
+    layer._cached_substitution_weights = None
+
+    real_rebuild = runtime_module.rebuild_params4bit
+    calls = {"n": 0}
+
+    def counting_rebuild(*args, **kwargs):
+        calls["n"] += 1
+        return real_rebuild(*args, **kwargs)
+
+    monkeypatch.setattr(runtime_module, "rebuild_params4bit", counting_rebuild)
+
+    quantized = sum(
+        ckpt in layer.quant_specs for ckpt in layer.name_map.values()
+    )
+    assert quantized > 0
+
+    first = layer._substituted_weights(buffers)
+    second = layer._substituted_weights(buffers)
+    assert second is first
+    assert calls["n"] == quantized
+
+    # A different mapping object represents a different pool view and must not
+    # inherit the cache, even when it currently points at the same tensors.
+    other_mapping = dict(buffers)
+    third = layer._substituted_weights(other_mapping)
+    assert third is not first
+    assert calls["n"] == 2 * quantized
