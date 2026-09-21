@@ -281,6 +281,85 @@ class _ProbePlan:
     vocab_size: int
     predicted_bytes: int
     available_bytes: int
+    task: str = "sft"
+    batch_size: int = 1
+
+
+_PROBE_FULL_SEQUENCE_KEYS = (
+    "input_ids",
+    "chosen_input_ids",
+    "rejected_input_ids",
+    "completion_input_ids",
+    "KL_completion_input_ids",
+)
+
+
+def _resize_probe_tensor(value, *, length: int, fill_from_last: bool):
+    """Resize one rank-2 token tensor to the configured probe length (#840)."""
+    import torch
+
+    if not isinstance(value, torch.Tensor) or value.ndim != 2:
+        return value
+    current = int(value.shape[1])
+    if current == length:
+        return value
+    if current > length:
+        return value[:, :length]
+    if current == 0:
+        raise ValueError("cannot extend an empty preference-probe token sequence")
+    pad = length - current
+    if fill_from_last:
+        tail = value[:, -1:].expand(-1, pad)
+    else:
+        tail = torch.ones((value.shape[0], pad), dtype=value.dtype, device=value.device)
+    return torch.cat((value, tail), dim=1)
+
+
+def _stretch_preference_probe_batch(batch: dict, *, seq_len: int) -> dict:
+    """Make the real TRL batch occupy the configured sequence budget (#840).
+
+    The probe executes trainer.compute_loss, so TRL supplies the real log-prob
+    reduction, reference forward and KTO KL forward. Only complete model
+    sequences are extended; prompt-only and answer-only helper fields stay
+    untouched.
+    """
+    if seq_len < 1:
+        raise ValueError(f"seq_len must be >= 1; got {seq_len}")
+    out = dict(batch)
+    seen = 0
+    for ids_key in _PROBE_FULL_SEQUENCE_KEYS:
+        ids = batch.get(ids_key)
+        if ids is None or not hasattr(ids, "ndim") or ids.ndim != 2:
+            continue
+        seen += 1
+        resized_ids = _resize_probe_tensor(ids, length=seq_len, fill_from_last=True)
+        out[ids_key] = resized_ids
+        stem = ids_key[: -len("input_ids")]
+        attention_key = stem + "attention_mask"
+        if attention_key in batch:
+            out[attention_key] = _resize_probe_tensor(
+                batch[attention_key], length=seq_len, fill_from_last=False
+            )
+        labels_key = stem + "labels"
+        if labels_key in batch:
+            labels = _resize_probe_tensor(
+                batch[labels_key], length=seq_len, fill_from_last=True
+            )
+            if labels.shape == resized_ids.shape:
+                original = min(int(batch[labels_key].shape[1]), seq_len)
+                if original < seq_len:
+                    labels = labels.clone()
+                    labels[:, original:] = resized_ids[:, original:]
+            out[labels_key] = labels
+        if ids_key == "input_ids" and "completion_mask" in batch:
+            out["completion_mask"] = _resize_probe_tensor(
+                batch["completion_mask"], length=seq_len, fill_from_last=False
+            )
+    if not seen:
+        raise ValueError(
+            "preference VRAM probe found no complete token sequence in the TRL batch"
+        )
+    return out
 
 
 def _existing_disk_anchor(path: str) -> str:
@@ -975,7 +1054,14 @@ class StreamingSetupMixin:
         self.model = model
         self._stream_runtime = runtime
         if probe_plan is not None:
-            self._run_stream_vram_probe(model, probe_plan)
+            if cfg.task == "sft":
+                self._run_stream_vram_probe(model, probe_plan)
+            else:
+                # #840 — preference losses must be measured through the real
+                # TRL trainer, which does not exist until after this shared
+                # streaming setup returns. Carry the exact pre-flight plan
+                # forward so the post-trainer probe measures the same shape.
+                self._pending_stream_vram_probe = probe_plan
         stats = runtime.stats()
         source_line = _stream_source_line(stats)
         large_runtime_buffer = stats.get("large_buffer_bytes", 0)
@@ -1237,6 +1323,8 @@ class StreamingSetupMixin:
         plan = None
         if tcfg.stream_vram_probe:
             plan = _ProbePlan(
+                task=str(getattr(cfg, "task", "sft")),
+                batch_size=int(batch),
                 rows=rows,
                 seq_len=seq_len,
                 vocab_size=vocab,
@@ -1252,7 +1340,6 @@ class StreamingSetupMixin:
         released first: it holds the pinned RAM store, and `setup()` raising is
         outside the ExitStack that `_training_context` installs around training.
         """
-        from soup_cli.utils.layer_stream import decide_measured_fit
         from soup_cli.utils.layer_stream_runtime import measure_step_peak_bytes
 
         try:
@@ -1272,11 +1359,49 @@ class StreamingSetupMixin:
             # when a second caller appears.
             self._close_stream_runtime()
             raise
+        self._finish_stream_vram_probe(peak, plan)
+
+    def _run_pending_stream_vram_probe(self) -> None:
+        """Measure a preference loss after its real TRL trainer exists (#840)."""
+        plan = getattr(self, "_pending_stream_vram_probe", None)
+        if plan is None:
+            return
+        self._pending_stream_vram_probe = None
+        try:
+            batch = next(iter(self.trainer.get_train_dataloader()))
+            batch = _stretch_preference_probe_batch(batch, seq_len=plan.seq_len)
+            model_device = next(
+                param.device for param in self.model.parameters() if not param.is_meta
+            )
+            batch = {
+                key: (value.to(model_device) if hasattr(value, "to") else value)
+                for key, value in batch.items()
+            }
+        except Exception:
+            self._close_stream_runtime()
+            raise
+
+        from soup_cli.utils.layer_stream_runtime import measure_loss_step_peak_bytes
+
+        self.model.train()
+        try:
+            peak = measure_loss_step_peak_bytes(
+                self.model,
+                step=lambda: self.trainer.compute_loss(self.model, batch),
+                rows=plan.rows,
+                seq_len=plan.seq_len,
+                device=str(self.device),
+            )
+        except Exception:
+            self._close_stream_runtime()
+            raise
+        self._finish_stream_vram_probe(peak, plan)
+
+    def _finish_stream_vram_probe(self, peak, plan: _ProbePlan) -> None:
+        """Apply the one measured-fit policy shared by SFT and preferences."""
+        from soup_cli.utils.layer_stream import decide_measured_fit
+
         if peak is None:
-            # Instrument failure, not a verdict. Fall back to the formula so the
-            # run is never left with no gate at all — but if the formula had
-            # already refused, honour that refusal rather than proceeding on
-            # the strength of a probe that did not happen.
             console.print(
                 "[yellow]The measured VRAM probe could not run; falling back to "
                 "the predicted budget.[/]"
@@ -1284,36 +1409,29 @@ class StreamingSetupMixin:
             if plan.predicted_bytes > plan.available_bytes:
                 self._close_stream_runtime()
                 raise ValueError(
-                    f"a streaming step is predicted to need "
-                    f"{plan.predicted_bytes / 1e9:.2f} GB of VRAM but only "
-                    f"{plan.available_bytes / 1e9:.2f} GB is free, and the "
-                    f"measured probe that could have overruled that prediction "
-                    f"failed to run. Lower training.batch_size or "
-                    f"data.max_length."
+                    f"a streaming step is predicted to need {plan.predicted_bytes / 1e9:.2f} GB "
+                    f"of VRAM but only {plan.available_bytes / 1e9:.2f} GB is free, and the "
+                    "measured probe that could have overruled that prediction failed to run. "
+                    "Lower training.batch_size or data.max_length."
                 )
             return
         if peak.failed:
-            # The probe ran a real CUDA op and it raised. The fit is unknown and
-            # the context may be unusable, so this refuses rather than falling
-            # back to the prediction: "the arithmetic was happy" is not a reason
-            # to keep driving a device that just failed.
             self._close_stream_runtime()
             raise ValueError(
                 f"the measured VRAM probe raised {peak.error} while running one "
-                f"step at batch {plan.rows} x seq {plan.seq_len}. The fit could "
-                f"not be established and the CUDA context may no longer be "
-                f"usable, so this run is refused rather than continued on the "
-                f"predicted budget ({plan.predicted_bytes / 1e9:.2f} GB). Re-run "
-                f"without training.stream_vram_probe to use the prediction."
+                f"{plan.task} step at {plan.rows} model rows x seq {plan.seq_len}. The fit "
+                "could not be established and the CUDA context may no longer be usable, so "
+                f"this run is refused rather than continued on the predicted budget "
+                f"({plan.predicted_bytes / 1e9:.2f} GB). Re-run without "
+                "training.stream_vram_probe to use the prediction."
             )
         if peak.oom:
             self._close_stream_runtime()
             raise ValueError(
-                f"a streaming step at batch {plan.rows} x seq {plan.seq_len} ran "
-                f"out of VRAM while being measured (predicted "
-                f"{plan.predicted_bytes / 1e9:.2f} GB, "
-                f"{plan.available_bytes / 1e9:.2f} GB free). Lower "
-                f"training.batch_size or data.max_length."
+                f"a {plan.task} streaming step at {plan.rows} model rows x seq "
+                f"{plan.seq_len} ran out of VRAM while being measured (predicted "
+                f"{plan.predicted_bytes / 1e9:.2f} GB, {plan.available_bytes / 1e9:.2f} GB "
+                "free). Lower training.batch_size or data.max_length."
             )
         fit = decide_measured_fit(
             measured_bytes=peak.peak_bytes,
@@ -1321,9 +1439,9 @@ class StreamingSetupMixin:
             available_bytes=plan.available_bytes,
         )
         console.print(
-            f"[dim]measured peak {peak.peak_bytes / 1e9:.2f} GB "
-            f"({peak.reserved_bytes / 1e9:.2f} GB reserved) in "
-            f"{peak.seconds:.2f} s at batch {plan.rows} x seq {plan.seq_len}; "
+            f"[dim]measured {plan.task} peak {peak.peak_bytes / 1e9:.2f} GB "
+            f"({peak.reserved_bytes / 1e9:.2f} GB reserved) in {peak.seconds:.2f} s at "
+            f"batch {plan.batch_size} ({plan.rows} model rows) x seq {plan.seq_len}; "
             f"predicted {plan.predicted_bytes / 1e9:.2f} GB[/]"
         )
         if not fit.fits:
