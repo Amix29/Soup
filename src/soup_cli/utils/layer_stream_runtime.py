@@ -1231,6 +1231,13 @@ def _build_streamed_layer_class():
             self.use_checkpoint = bool(use_checkpoint)
             self.quant_specs = dict(quant_specs or {})
             self.codes = dict(codes or {})
+            # #841 — each wrapper returns to the same pool slot on every visit.
+            # Cache the tensor/Params4bit substitution views for that slot rather
+            # than reconstructing Python wrappers and QuantState objects on every
+            # forward and checkpoint recompute. The views share storage with the
+            # pool tensors, so later layer loads update their contents in place.
+            self._cached_substitution_buffers = None
+            self._cached_substitution_weights = None
             # v0.72.5 (#331) — a streamed NF4 weight must not reach MatMul4Bit,
             # which captures it outside save_for_backward and so aliases the pool
             # across the checkpoint boundary. See install_dequant_forward.
@@ -1455,11 +1462,18 @@ def _build_streamed_layer_class():
             # Weights arrive with requires_grad=False, so autograd allocates no
             # grad buffers for them — but W STAYS IN THE GRAPH for W^T . dL/dy,
             # which is how the lower adapters receive gradient at all.
-            if not self.quant_specs:
-                return {meta: buffers[ckpt] for meta, ckpt in self.name_map.items()}
-            # NF4: a Params4bit VIEW is rebuilt over the pooled buffer on every
-            # call (plan P3). The packed bytes are never copied or re-quantised
-            # — only the small Python wrapper is reconstructed.
+            #
+            # #841 — a wrapper revisits the same pool-slot mapping every forward
+            # and checkpoint recompute. Only the tensors' CONTENTS change when a
+            # layer is loaded. Reuse the mapping and Params4bit/QuantState views
+            # while the mapping object is identical; rebuilding them is pure
+            # Python/object churn and does not create fresher storage.
+            if (
+                self._cached_substitution_buffers is buffers
+                and self._cached_substitution_weights is not None
+            ):
+                return self._cached_substitution_weights
+
             weights = {}
             for meta, ckpt in self.name_map.items():
                 spec = self.quant_specs.get(ckpt)
@@ -1467,6 +1481,8 @@ def _build_streamed_layer_class():
                     weights[meta] = buffers[ckpt]
                 else:
                     weights[meta] = rebuild_params4bit(ckpt, buffers, spec, self.codes)
+            self._cached_substitution_buffers = buffers
+            self._cached_substitution_weights = weights
             return weights
 
         def _body(self, hidden_states: Any, *args: Any, **kwargs: Any) -> Any:
