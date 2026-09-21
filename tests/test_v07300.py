@@ -24,11 +24,13 @@ across the whole forward-to-backward span, ANY de-aliasing keeps one copy of eve
 layer alive for that span and costs O(model), not O(window). On real 32B that was
 peak VRAM 4 220 -> 19 720 MiB, which deletes the feature's premise.
 
-THE REPAIR: do not send a streamed NF4 weight through ``MatMul4Bit`` at all.
-Dequantise inside the checkpointed region and use a native matmul. ``F.linear``
-saves the dequantised weight properly, so checkpointing DOES discard and recompute
-it, and the transient lives only inside the recomputed block — O(window) by
-construction.
+THE REPAIR: do not send a streamed NF4 weight through bitsandbytes'
+``MatMul4Bit`` autograd Function at all. v0.73.0 dequantised inside the
+checkpointed region and used ``F.linear``. #842 may instead call the native
+``bitsandbytes::gemm_4bit`` forward through Soup's own autograd Function, whose
+packed weight and quantisation tensors all pass through ``save_for_backward``.
+Either route is visible to checkpointing; the unsafe plain-ctx lifetime remains
+forbidden.
 
 WHY THIS IS NOT A NUMERICS CHANGE AT TRAINING SHAPES (STEP 13 of the record)
 
