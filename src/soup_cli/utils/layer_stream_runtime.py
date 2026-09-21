@@ -175,6 +175,169 @@ def rebuild_params4bit(key: str, buffers: Mapping[str, Any], spec: Any, codes: M
     )
 
 
+_CHECKPOINT_VISIBLE_NF4_FUNCTION = None
+
+
+def _checkpoint_visible_nf4_function():
+    """Lazy custom autograd Function whose saved state is visible to checkpoint (#842)."""
+    global _CHECKPOINT_VISIBLE_NF4_FUNCTION
+    if _CHECKPOINT_VISIBLE_NF4_FUNCTION is not None:
+        return _CHECKPOINT_VISIBLE_NF4_FUNCTION
+
+    import bitsandbytes.functional as bnb_functional
+    import torch
+
+    class CheckpointVisibleNF4Matmul(torch.autograd.Function):
+        @staticmethod
+        def forward(
+            ctx,
+            x,
+            packed,
+            absmax,
+            state2_absmax,
+            state2_code,
+            offset,
+            bias,
+            shape,
+            weight_dtype,
+            blocksize,
+            quant_type,
+            nested,
+            state2_blocksize,
+        ):
+            # #331/#842: every tensor the backward needs goes through
+            # save_for_backward. Non-reentrant checkpoint can therefore discard
+            # these references and recreate them after the streaming slot has
+            # been refilled with the correct layer during recompute.
+            ctx.save_for_backward(packed, absmax, state2_absmax, state2_code, offset)
+            ctx.shape = tuple(int(dim) for dim in shape)
+            ctx.weight_dtype = weight_dtype
+            ctx.blocksize = int(blocksize)
+            ctx.quant_type = str(quant_type)
+            ctx.nested = bool(nested)
+            ctx.state2_blocksize = int(state2_blocksize)
+            ctx.bias_dtype = None if bias is None else bias.dtype
+
+            if ctx.nested:
+                return torch.ops.bitsandbytes.gemm_4bit.default(
+                    x,
+                    packed,
+                    ctx.shape,
+                    state2_absmax,
+                    ctx.blocksize,
+                    ctx.quant_type,
+                    bias=bias,
+                    absmax_8bit=absmax,
+                    absmax_code=state2_code,
+                    absmax_offset=offset,
+                )
+            return torch.ops.bitsandbytes.gemm_4bit.default(
+                x, packed, ctx.shape, absmax, ctx.blocksize, ctx.quant_type, bias=bias
+            )
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            packed, absmax, state2_absmax, state2_code, offset = ctx.saved_tensors
+            state2 = None
+            q_offset = None
+            if ctx.nested:
+                state2 = bnb_functional.QuantState(
+                    absmax=state2_absmax,
+                    code=state2_code,
+                    blocksize=ctx.state2_blocksize,
+                    dtype=torch.float32,
+                )
+                q_offset = offset
+            quant_state = bnb_functional.QuantState(
+                absmax=absmax,
+                shape=torch.Size(ctx.shape),
+                dtype=ctx.weight_dtype,
+                blocksize=ctx.blocksize,
+                quant_type=ctx.quant_type,
+                offset=q_offset,
+                state2=state2,
+            )
+            # bitsandbytes 0.50.x exposes a fused forward GEMM but no transposed
+            # 4-bit GEMM for dX. Keep this fallback explicit: it is correct and
+            # checkpoint-visible, but #842 remains open until this dense
+            # dequantisation is replaced by a real transposed kernel.
+            weight = bnb_functional.dequantize_4bit(packed, quant_state).to(
+                grad_output.dtype
+            )
+            grad_x = torch.matmul(grad_output, weight)
+            grad_bias = None
+            if ctx.bias_dtype is not None:
+                grad_bias = grad_output.reshape(-1, grad_output.shape[-1]).sum(
+                    dim=0, dtype=ctx.bias_dtype
+                )
+            return (
+                grad_x,
+                None,
+                None,
+                None,
+                None,
+                None,
+                grad_bias,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+
+    _CHECKPOINT_VISIBLE_NF4_FUNCTION = CheckpointVisibleNF4Matmul
+    return CheckpointVisibleNF4Matmul
+
+
+def checkpoint_visible_nf4_linear(
+    x: Any, packed: Any, quant_state: Any, bias: Any = None
+) -> Any:
+    """Fused NF4 forward with checkpoint-visible packed state (#842)."""
+    empty = packed.new_empty((0,))
+    state2_absmax = empty
+    state2_code = empty
+    offset = empty
+    state2_blocksize = 0
+    if quant_state.nested:
+        state2_absmax = quant_state.state2.absmax
+        state2_code = quant_state.state2.code
+        offset = quant_state.offset
+        state2_blocksize = int(quant_state.state2.blocksize)
+    return _checkpoint_visible_nf4_function().apply(
+        x,
+        packed,
+        quant_state.absmax,
+        state2_absmax,
+        state2_code,
+        offset,
+        bias,
+        tuple(quant_state.shape),
+        quant_state.dtype,
+        int(quant_state.blocksize),
+        str(quant_state.quant_type),
+        bool(quant_state.nested),
+        state2_blocksize,
+    )
+
+
+def _can_use_checkpoint_visible_nf4_gemm(x: Any, quant_state: Any) -> bool:
+    """Capability gate for the #842 fused-forward path, not a version check."""
+    if getattr(getattr(x, "device", None), "type", None) != "cuda":
+        return False
+    if bool(getattr(quant_state, "nested", False)):
+        state2 = getattr(quant_state, "state2", None)
+        if state2 is None or int(getattr(state2, "blocksize", 0)) != 256:
+            return False
+    try:
+        import torch
+
+        torch.ops.bitsandbytes.gemm_4bit.default
+    except (ImportError, AttributeError, RuntimeError):
+        return False
+    return True
+
+
 def install_dequant_forward(module: Any) -> int:
     """#331 — keep a STREAMED NF4 weight out of ``bitsandbytes``' ``MatMul4Bit``.
 
@@ -195,17 +358,19 @@ def install_dequant_forward(module: Any) -> int:
     forward-to-backward span, so any copy keeps one layer alive for that span and
     costs O(model). On real 32B, peak VRAM 4 220 -> 19 720 MiB.
 
-    So the weight never enters that autograd Function. It is dequantised inside the
-    checkpointed region and multiplied natively; ``F.linear`` saves the dequantised
-    tensor through the ordinary mechanism, which checkpointing DOES discard and
-    recompute, and the transient lives only inside the recomputed block — O(window).
+    The streamed weight still never enters bitsandbytes' ``MatMul4Bit`` Function.
+    On stacks exposing ``bitsandbytes::gemm_4bit``, #842 routes the forward through
+    Soup's own autograd Function instead: packed bytes and every quantisation tensor
+    go through ``save_for_backward``, so non-reentrant checkpointing can discard
+    and recompute them after the pool refills the correct layer. On older stacks
+    (and non-CUDA devices), the v0.73.0 repair remains unchanged:
+    ``dequantize_4bit`` + ``F.linear`` inside the checkpointed region.
 
-    This changes the computation path used by the patched NF4 module. With
-    bitsandbytes 0.50.2, the native fused ``MatMul4Bit`` path and explicit
-    ``dequantize_4bit`` + ``F.linear`` can differ depending on the CUDA
-    architecture and projection shape. The dequantise + linear path is retained
-    for correctness under checkpointing (#331); this path choice is not assumed
-    to be numerically free.
+    The #842 Function is deliberately only the first half of the intended kernel.
+    bitsandbytes exposes a fused forward GEMM but no transposed 4-bit GEMM for
+    ``grad_x = grad_y @ W``; its backward also dequantises. Soup therefore keeps
+    that dense-dequant backward explicitly until a transposed kernel exists. Do
+    not claim the full #842 throughput ceiling from the fused-forward path alone.
 
     Returns the number of modules patched, so a caller can assert it patched
     something. Zero would mean the model carries no 4-bit linears at all.
@@ -233,8 +398,20 @@ def install_dequant_forward(module: Any) -> int:
         if bias is not None:
             bias = bias.to(x.dtype)
 
-        # THE repair: dequantise here, inside whatever checkpointed region this
-        # forward is running in, and let F.linear save the dense weight properly.
+        # #842: bnb 0.50+ exposes a fused 4-bit forward GEMM. Route
+        # through Soup's own autograd Function so the packed weight and every
+        # quantisation tensor are saved via save_for_backward, unlike bnb's
+        # MatMul4Bit plain ctx attributes (#331). The backward remains the
+        # explicit dense-dequant fallback until bnb exposes a transposed 4-bit
+        # GEMM (or Soup ships one), so this is a safe first half rather than a
+        # claim that #842's full kernel work is complete.
+        if _can_use_checkpoint_visible_nf4_gemm(x, quant_state):
+            return checkpoint_visible_nf4_linear(
+                x, self.weight, quant_state, bias
+            ).to(inp_dtype)
+
+        # Compatibility path: dequantise inside the checkpointed region and let
+        # F.linear save the dense weight properly.
         weight = dequantize_4bit(self.weight, quant_state).to(x.dtype)
         return functional.linear(x, weight, bias).to(inp_dtype)
 
