@@ -286,7 +286,7 @@ Accepted runs are recorded in [`benchmarks/gpu-test-runs.md`](benchmarks/gpu-tes
 | test_multi_gpu.py | Multi-GPU Mastery: topology, --gpus, accelerate launcher, ZeRO++, FSDP2+compile, pipeline (v0.27.0) |
 | test_training_speed.py | Training Speed & Memory: CCE, FP8, grad-ckpt tiers, kernel picker, cross-doc attn, activation offload (v0.28.0) |
 | test_hf_integration.py | HF Hub Deep Integration: token/endpoint/repo_id, auto-push callback, model card v2, collections, data push, HF Spaces, private-IP SSRF (v0.29.0) |
-| test_inference_advanced.py | Inference Excellence: prefix caching, spec-decoding auto-pairing, LoRA hot-swap, structured output, dashboard + /metrics, OpenTelemetry tracing, auto-quant refusal (v0.30.0; #816) |
+| test_inference_advanced.py | Inference Excellence: prefix caching, spec-decoding auto-pairing, LoRA hot-swap, structured output, dashboard + /metrics, OpenTelemetry tracing, dormant auto-quant helpers (v0.30.0; serving refuses auto-quant since #816) |
 | test_recipes_v031.py | Model & Recipe Breadth: 34 new recipes (vision/audio/reasoning/edge/domain/multimodal); catalog-wide invariants; CI workflow validation (v0.31.0) |
 | test_auto_tuning.py | Training Stability & Auto-Tuning: LR range finder, grad-accum monitor, auto mixed-precision, auto warmup, spike recovery, convergence detector, autopilot wiring (v0.32.0) |
 | test_part_f_hardening.py | Live Wire Part F: RLVR OS-level sandbox isolation + prune_checkpoints TOCTOU (v0.33.0) |
