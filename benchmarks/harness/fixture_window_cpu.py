@@ -6,10 +6,12 @@ This is NOT a replay of the full-model tiny-Llama logits numbers recorded in
 H100 host CPU, and 2.509e-03 on CI). Those numbers compare a streamed two-layer
 model with a resident model.
 
-Instead this harness reconstructs, one ``Linear4bit`` at a time, the narrower
-question assigned to the historical ``cpu_mode_probe.py``:
-does bitsandbytes' CPU *inference* packing path create a numerical difference
-that is absent from the training-style path?
+Instead this harness reconstructs, one ``Linear4bit`` at a time, both STEP
+13 questions that were lost with the scratchpad: where the CI fixture sits
+relative to the CPU fused-kernel window (the historical
+``fixture_window_cpu.py``) and whether bitsandbytes' CPU *inference* packing
+path creates the rounding-scale numerical difference investigated by the
+historical ``cpu_mode_probe.py``.
 
 Requirements / attribution boundary
 -----------------------------------
@@ -27,11 +29,20 @@ Requirements / attribution boundary
   layer-stream shards.
 
 Default invocation is a mechanism gate:
-1. at least one inference row must enter CPU packing;
-2. the training arm must stay unpacked and equal Soup variant 2 EXACTLY;
-3. every packed inference row must differ from variant 2.
+1. the training arm must stay unpacked and equal Soup variant 2 EXACTLY;
+2. at least one inference row must enter CPU packing;
+3. every packed inference row must differ from variant 2;
+4. every packed difference must remain rounding-scale: strictly greater than
+   zero and at most 2% of ``max(abs(variant2))``. The historical emulated bf16
+   path measured 0.31-0.41%, so 2% is a deliberately loose few-ulp envelope,
+   while the broken packed-layout simulation measured 129-188%.
 
-Use ``--survey`` to print the same JSON while always exiting 0.
+Exit codes: 0 mechanism reproduced; 2 packing unavailable; 3 invalid training
+control; 4 packed effect absent on at least one row; 5 packed effect is too
+large to be the rounding-scale mechanism.
+
+``--survey`` waives only exit 2 (missing capability). A broken control or
+nonsensical packed result still fails closed.
 """
 
 from __future__ import annotations
@@ -50,6 +61,12 @@ EXIT_OK = 0
 EXIT_MECHANISM_ABSENT = 2
 EXIT_CONTROL_FAILED = 3
 EXIT_EFFECT_ABSENT = 4
+EXIT_EFFECT_OUT_OF_RANGE = 5
+
+# Correct bf16-path simulations in the historical record are ~0.3-0.4%.
+# Keep a deliberately loose few-ulp ceiling while rejecting the 129-188%
+# broken-layout effect measured on a host without the packed CPU kernel.
+PACKED_EFFECT_REL_ENVELOPE = 0.02
 
 
 @dataclass(frozen=True)
@@ -59,7 +76,9 @@ class Row:
     m: int
     inference_packed_for_cpu: bool
     training_packed_for_cpu: bool
+    variant2_max_abs: float
     inference_vs_variant2_max_abs: float
+    inference_vs_variant2_rel: float
     training_vs_variant2_max_abs: float
     inference_vs_training_max_abs: float
 
@@ -100,7 +119,9 @@ def measure_row(out_features: int, in_features: int, m: int, *, seed: int = 17) 
 
     from soup_cli.utils.layer_stream_runtime import install_dequant_forward
 
-    generator = torch.Generator().manual_seed(seed + out_features + m)
+    # Include the full tuple so different fixture/shape rows do not share a stream.
+    row_seed = seed + out_features * 1_000_003 + in_features * 1_009 + m
+    generator = torch.Generator().manual_seed(row_seed)
     weight = torch.randn(
         (out_features, in_features),
         generator=generator,
@@ -146,15 +167,24 @@ def measure_row(out_features: int, in_features: int, m: int, *, seed: int = 17) 
         )
     )
 
+    inference_diff = float((inference - variant2).abs().max())
+    variant2_max = float(variant2.abs().max())
+    if variant2_max > 0.0:
+        inference_rel = inference_diff / variant2_max
+    elif inference_diff == 0.0:
+        inference_rel = 0.0
+    else:
+        inference_rel = float("inf")
+
     return Row(
         out_features=out_features,
         in_features=in_features,
         m=m,
         inference_packed_for_cpu=inference_packed,
         training_packed_for_cpu=training_packed,
-        inference_vs_variant2_max_abs=float(
-            (inference - variant2).abs().max()
-        ),
+        variant2_max_abs=variant2_max,
+        inference_vs_variant2_max_abs=inference_diff,
+        inference_vs_variant2_rel=inference_rel,
         training_vs_variant2_max_abs=float(
             (training - variant2).abs().max()
         ),
@@ -165,19 +195,8 @@ def measure_row(out_features: int, in_features: int, m: int, *, seed: int = 17) 
 
 
 def _evaluate_rows(rows: list[Row]) -> dict:
-    packed_rows = [row for row in rows if row.inference_packed_for_cpu]
-
-    if not packed_rows:
-        return {
-            "verdict": "mechanism_absent",
-            "exit_code": EXIT_MECHANISM_ABSENT,
-            "reason": (
-                "CPU inference packing did not run; this host cannot demonstrate "
-                "the cpu_mode_probe mechanism."
-            ),
-            "attribution": "none",
-        }
-
+    # A broken control is a harness/Soup failure on every host; do not hide it
+    # behind a missing-AVX512 capability verdict.
     if any(row.training_packed_for_cpu for row in rows) or any(
         row.training_vs_variant2_max_abs != 0.0 for row in rows
     ):
@@ -191,10 +210,19 @@ def _evaluate_rows(rows: list[Row]) -> dict:
             "attribution": "invalid-control",
         }
 
-    if any(
-        row.inference_vs_variant2_max_abs == 0.0
-        for row in packed_rows
-    ):
+    packed_rows = [row for row in rows if row.inference_packed_for_cpu]
+    if not packed_rows:
+        return {
+            "verdict": "mechanism_absent",
+            "exit_code": EXIT_MECHANISM_ABSENT,
+            "reason": (
+                "CPU inference packing did not run; this host cannot demonstrate "
+                "the cpu_mode_probe mechanism."
+            ),
+            "attribution": "none",
+        }
+
+    if any(row.inference_vs_variant2_max_abs == 0.0 for row in packed_rows):
         return {
             "verdict": "packed_effect_absent",
             "exit_code": EXIT_EFFECT_ABSENT,
@@ -205,18 +233,59 @@ def _evaluate_rows(rows: list[Row]) -> dict:
             "attribution": "packed-path-detected-no-universal-divergence",
         }
 
+    if any(
+        not (0.0 < row.inference_vs_variant2_rel <= PACKED_EFFECT_REL_ENVELOPE)
+        for row in packed_rows
+    ):
+        return {
+            "verdict": "packed_effect_out_of_range",
+            "exit_code": EXIT_EFFECT_OUT_OF_RANGE,
+            "reason": (
+                "the packed inference path ran, but at least one packed row "
+                "differs by more than the 2% rounding-scale envelope."
+            ),
+            "attribution": "packed-path-detected-non-rounding-scale-effect",
+        }
+
     return {
         "verdict": "mechanism_reproduced",
         "exit_code": EXIT_OK,
         "reason": (
-            "packed inference differs on every packed row while the training "
-            "control is exactly equal to Soup variant 2."
+            "every packed row differs from Soup variant 2 within the 2% "
+            "rounding-scale envelope while the training control is exact."
         ),
         "attribution": (
             "bitsandbytes packed CPU inference path; exact lower-level kernel "
-            "not instrumented"
+            "reported separately"
         ),
     }
+
+def _cpu_packed_kernel_attribution() -> str:
+    """Best-effort bnb 0.50.x attribution without making it a gate."""
+    try:
+        import bitsandbytes.backends.cpu.ops as cpu_ops
+    except Exception:
+        return "unknown"
+
+    marker = getattr(cpu_ops, "gemm_4bit_forward_kernel", "__missing__")
+    if marker == "__missing__":
+        return "unknown"
+    if marker is None:
+        return "native-bitsandbytes-cpu-gemv"
+    return "kernels-community"
+
+
+def _cpu_gemv_registered() -> bool | None:
+    try:
+        import torch
+
+        return bool(
+            torch._C._dispatch_has_kernel_for_dispatch_key(
+                "bitsandbytes::gemv_4bit", "CPU"
+            )
+        )
+    except Exception:
+        return None
 
 
 def run_probe(*, m_values=M_VALUES, shapes=FIXTURE_SHAPES) -> dict:
@@ -238,6 +307,8 @@ def run_probe(*, m_values=M_VALUES, shapes=FIXTURE_SHAPES) -> dict:
         "kernels_package_installed": (
             importlib.util.find_spec("kernels") is not None
         ),
+        "cpu_packed_kernel": _cpu_packed_kernel_attribution(),
+        "cpu_gemv_4bit_registered": _cpu_gemv_registered(),
         "rows": [asdict(row) for row in rows],
         "packed_inference_rows": sum(
             row.inference_packed_for_cpu for row in rows
@@ -253,14 +324,17 @@ def run_probe(*, m_values=M_VALUES, shapes=FIXTURE_SHAPES) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--output", help="optional JSON output path")
     parser.add_argument(
         "--survey",
         action="store_true",
         help=(
-            "capability-only survey: print verdict JSON but exit 0 even when "
-            "the mechanism is absent or its controls fail"
+            "capability-only survey: waive exit 2 when CPU packing is absent; "
+            "control/effect failures still fail closed"
         ),
     )
     args = parser.parse_args(argv)
@@ -276,10 +350,9 @@ def main(argv: list[str] | None = None) -> int:
             encoding="utf-8",
         )
 
-    if args.survey:
-        return EXIT_OK
-
     code = int(result["exit_code"])
+    if args.survey and code == EXIT_MECHANISM_ABSENT:
+        return EXIT_OK
     if code != EXIT_OK:
         print(str(result["reason"]), file=sys.stderr)
     return code
