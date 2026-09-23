@@ -1384,9 +1384,7 @@
     },
     "oute-tts": {
       "base": "OuteAI/OuteTTS-0.3-500M",
-      "data.audio_dir": "./data/audio",
-      "data.format": "audio",
-      "data.train": "./data/tts_train.jsonl",
+      "data.train": "./data/tts_pre_encoded.jsonl",
       "modality": "audio_out",
       "task": "tts",
       "training.lr": 5e-05,
@@ -2168,9 +2166,7 @@
     },
     "spark-tts": {
       "base": "SparkAudio/Spark-TTS-0.5B",
-      "data.audio_dir": "./data/audio",
-      "data.format": "audio",
-      "data.train": "./data/tts_train.jsonl",
+      "data.train": "./data/tts_pre_encoded.jsonl",
       "modality": "audio_out",
       "task": "tts",
       "training.lr": 5e-05,

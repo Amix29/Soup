@@ -1,0 +1,82 @@
+"""#265 slice 2: fail closed on incompatible Spark/Oute live-codec installs."""
+
+import pytest
+
+
+@pytest.mark.parametrize(
+    "family,needle",
+    [
+        ("spark", "no installable 'sparktts' PyPI package"),
+        ("oute", "transformers==4.52.3"),
+    ],
+)
+def test_encoder_dispatch_names_the_real_upstream_blocker(family, needle):
+    from soup_cli.utils.tts_codec import tts_encoder_for_family
+
+    with pytest.raises(RuntimeError, match=needle):
+        tts_encoder_for_family(family)
+
+
+@pytest.mark.parametrize("family", ["spark", "oute"])
+def test_trainer_refuses_before_import_probe(family):
+    from soup_cli.trainer.tts import TTSTrainerWrapper
+
+    wrapper = object.__new__(TTSTrainerWrapper)
+    with pytest.raises(RuntimeError, match="Refusing|refus|raw-audio"):
+        wrapper._require_tts_codec(family)
+
+
+@pytest.mark.parametrize("family", ["spark", "oute"])
+def test_raw_audio_is_refused_at_config_parse_time(family):
+    from soup_cli.config.loader import load_config_from_string
+
+    yaml = f"""base: test/model
+task: tts
+modality: audio_out
+data:
+  train: ./tts.jsonl
+  format: audio
+  audio_dir: ./audio
+training:
+  tts_family: {family}
+"""
+    with pytest.raises(ValueError, match="Spark|Oute|spark|oute"):
+        load_config_from_string(yaml)
+
+
+@pytest.mark.parametrize(
+    "recipe_name,family", [("spark-tts", "spark"), ("oute-tts", "oute")]
+)
+def test_shipped_recipes_use_the_working_preencoded_path(recipe_name, family):
+    from soup_cli.config.loader import load_config_from_string
+    from soup_cli.recipes.catalog import RECIPES
+
+    cfg = load_config_from_string(RECIPES[recipe_name].yaml_str)
+    assert cfg.training.tts_family == family
+    assert cfg.data.format == "chatml"
+
+
+def test_spark_message_does_not_recommend_nonexistent_pip_package():
+    from soup_cli.utils.tts_codec import incompatible_live_codec_error
+
+    message = str(incompatible_live_codec_error("spark"))
+    assert "pip install sparktts" not in message
+    assert "torch==2.5.1" in message
+    assert "transformers==4.46.2" in message
+    assert "data.format=chatml" in message
+
+
+def test_oute_message_does_not_recommend_resolver_breaking_install():
+    from soup_cli.utils.tts_codec import incompatible_live_codec_error
+
+    message = str(incompatible_live_codec_error("oute"))
+    assert "pip install outetts" not in message
+    assert "transcript/word alignment" in message
+    assert "transformers>=5.16.1" in message
+    assert "data.format=chatml" in message
+
+
+def test_incompatibility_helper_always_returns_runtime_error():
+    from soup_cli.utils.tts_codec import incompatible_live_codec_error
+
+    assert isinstance(incompatible_live_codec_error("orpheus"), RuntimeError)

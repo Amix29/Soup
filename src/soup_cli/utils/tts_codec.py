@@ -380,6 +380,36 @@ def csm_live_codec_error() -> RuntimeError:
     )
 
 
+def incompatible_live_codec_error(family: str) -> RuntimeError:
+    """Explain upstream packaging/objective blockers for #265 families."""
+    canonical = validate_tts_family(family)
+    if canonical == "spark":
+        return RuntimeError(
+            "TTS family 'spark' has no installable 'sparktts' PyPI package. "
+            "The official Spark-TTS source pins torch==2.5.1, torchaudio==2.5.1 "
+            "and transformers==4.46.2, which conflicts with Soup's supported "
+            "training stack (#265). Refusing raw-audio live encoding instead of "
+            "suggesting a nonexistent install or downgrading the environment. "
+            "Pre-encode with the official Spark-TTS environment and train with "
+            "data.format=chatml until a compatible native codec integration lands."
+        )
+    if canonical == "oute":
+        return RuntimeError(
+            "TTS family 'oute' live-codec preparation cannot safely depend on "
+            "the current outetts package: its published metadata pins "
+            "transformers==4.52.3 while Soup requires transformers>=5.16.1. "
+            "Oute v0.3 training also needs transcript/word alignment plus audio "
+            "codes, not a bare WAV-to-token substitution (#265). Refusing raw-audio "
+            "live encoding rather than silently downgrading Transformers or "
+            "training the wrong target. Use an upstream Oute environment to "
+            "pre-encode training examples and train with data.format=chatml "
+            "until a compatible native path lands."
+        )
+    return RuntimeError(
+        f"TTS family {canonical!r} has no incompatible-live-codec contract"
+    )
+
+
 def tts_encoder_for_family(
     family: str, *, device: Optional[str] = None
 ) -> Callable[[str], str]:
@@ -405,6 +435,8 @@ def tts_encoder_for_family(
         return _encode
     if canonical == "sesame_csm":
         raise csm_live_codec_error()
+    if canonical in {"spark", "oute"}:
+        raise incompatible_live_codec_error(canonical)
     pkg = tts_codec_package(canonical)
     raise RuntimeError(
         f"Live-codec encoding for TTS family '{canonical}' is not yet "
