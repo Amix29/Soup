@@ -3574,16 +3574,18 @@ output: ./output
         task="tts",
         size="0.5B",
         tags=("tts", "spark", "audio_out", "v0.52.0"),
-        description="Spark-TTS — live (v0.71.20)",
+        description=(
+            "Spark-TTS pre-encoded codec-token SFT; raw-audio live codec "
+            "refused by upstream pins"
+        ),
         yaml_str="""\
 base: SparkAudio/Spark-TTS-0.5B
 task: tts
 modality: audio_out
 
 data:
-  train: ./data/tts_train.jsonl
-  format: audio
-  audio_dir: ./data/audio
+  train: ./data/tts_pre_encoded.jsonl
+  format: chatml
   max_length: 2048
 
 training:
@@ -3600,16 +3602,15 @@ output: ./output
         task="tts",
         size="0.5B",
         tags=("tts", "oute", "audio_out", "emotion", "v0.52.0"),
-        description="Oute-TTS with emotion conditioning — live (v0.71.20)",
+        description="OuteTTS v0.3 pre-encoded SFT; raw-audio live codec refused by upstream pin",
         yaml_str="""\
 base: OuteAI/OuteTTS-0.3-500M
 task: tts
 modality: audio_out
 
 data:
-  train: ./data/tts_train.jsonl
-  format: audio
-  audio_dir: ./data/audio
+  train: ./data/tts_pre_encoded.jsonl
+  format: chatml
   max_length: 2048
 
 training:
