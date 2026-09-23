@@ -48,7 +48,7 @@ def search_recipes(
 
 
 # ---------------------------------------------------------------------------
-# Recipe catalog (174 recipes)
+# Recipe catalog (173 recipes)
 # ---------------------------------------------------------------------------
 
 RECIPES: Dict[str, RecipeMeta] = {
@@ -3565,34 +3565,6 @@ training:
   lr: 5e-5
   batch_size: auto
   tts_family: llasa
-
-output: ./output
-""",
-    ),
-    "spark-tts": RecipeMeta(
-        model="SparkAudio/Spark-TTS-0.5B",
-        task="tts",
-        size="0.5B",
-        tags=("tts", "spark", "audio_out", "v0.52.0"),
-        description=(
-            "Spark-TTS pre-encoded codec-token SFT; raw-audio live codec "
-            "refused by upstream pins"
-        ),
-        yaml_str="""\
-base: SparkAudio/Spark-TTS-0.5B
-task: tts
-modality: audio_out
-
-data:
-  train: ./data/tts_pre_encoded.jsonl
-  format: chatml
-  max_length: 2048
-
-training:
-  epochs: 3
-  lr: 5e-5
-  batch_size: auto
-  tts_family: spark
 
 output: ./output
 """,

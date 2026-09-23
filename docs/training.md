@@ -1662,8 +1662,8 @@ with an architecture-specific message because
 its 32 parallel Mimi codebooks require a native multimodal trainer, not a
 codec-string adapter.
 
-Four ready-made codec-string recipes ship: `orpheus-tts-sft`, `llasa-tts`,
-`spark-tts`, `oute-tts` — copy with `soup recipes use <name>`. Cross-validators
+Three ready-made codec-string recipes ship: `orpheus-tts-sft`, `llasa-tts`,
+`oute-tts` — copy with `soup recipes use <name>`. Cross-validators
 reject the `mlx` backend, `modality != audio_out`, and emotion tags outside the
 per-family allowlist.
 

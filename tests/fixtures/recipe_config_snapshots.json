@@ -2149,14 +2149,6 @@
       "training.lr": 0.0001,
       "training.quantization": "none"
     },
-    "spark-tts": {
-      "base": "SparkAudio/Spark-TTS-0.5B",
-      "data.train": "./data/tts_pre_encoded.jsonl",
-      "modality": "audio_out",
-      "task": "tts",
-      "training.lr": 5e-05,
-      "training.tts_family": "spark"
-    },
     "voxtral-sft": {
       "base": "mistralai/Voxtral-Mini-3B",
       "data.audio_dir": "./data/audio",

@@ -44,16 +44,19 @@ training:
         load_config_from_string(yaml)
 
 
-@pytest.mark.parametrize(
-    "recipe_name,family", [("spark-tts", "spark"), ("oute-tts", "oute")]
-)
-def test_shipped_recipes_use_the_working_preencoded_path(recipe_name, family):
+def test_oute_recipe_uses_the_working_preencoded_path():
     from soup_cli.config.loader import load_config_from_string
     from soup_cli.recipes.catalog import RECIPES
 
-    cfg = load_config_from_string(RECIPES[recipe_name].yaml_str)
-    assert cfg.training.tts_family == family
+    cfg = load_config_from_string(RECIPES["oute-tts"].yaml_str)
+    assert cfg.training.tts_family == "oute"
     assert cfg.data.format == "chatml"
+
+
+def test_unrunnable_spark_recipe_is_not_advertised():
+    from soup_cli.recipes.catalog import RECIPES
+
+    assert "spark-tts" not in RECIPES
 
 
 def test_spark_message_does_not_recommend_nonexistent_pip_package():
