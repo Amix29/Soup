@@ -1617,7 +1617,9 @@ data:
 training:
   tts_family: orpheus
   tts_emotion: neutral   # Orpheus + Oute only
-  lora: true
+  lora:
+    r: 16
+    alpha: 32
 ```
 
 Operator-supplied `data.new_special_tokens` are registered (deduplicated, only

@@ -1737,9 +1737,10 @@ class TrainingConfig(BaseModel):
     ]] = Field(
         default=None,
         description=(
-            "TTS model family — required when task='tts'. One of: orpheus, "
-            "sesame_csm, llasa, spark, oute. Selects the family-specific "
-            "codec and trainer preparation path."
+            "TTS model family — required when task='tts'. Recognized values: "
+            "orpheus, llasa, spark, oute, and sesame_csm. sesame_csm is "
+            "recognized only to produce an explicit refusal until Soup has a "
+            "native CSM multimodal trainer."
         ),
     )
     tts_emotion: Optional[str] = Field(

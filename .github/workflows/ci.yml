@@ -273,7 +273,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install with Transformers floor constraints
-        run: pip install -e ".[dev]" -c .github/constraints/transformers-floor.txt
+        run: pip install -e ".[dev,audio]" -c .github/constraints/transformers-floor.txt
       - name: Verify constrained dependency graph
         run: python -m pip check
       - name: Assert installed versions match floor constraints
@@ -332,6 +332,7 @@ jobs:
           tests/test_plotext_compat.py
           tests/test_bugfixes.py::TestDiffModelLoading
           tests/test_issue636_torch_floor.py
+          tests/test_issue265_xcodec2_audio_contract.py
 
   test:
     strategy:

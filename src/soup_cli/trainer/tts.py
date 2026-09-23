@@ -74,19 +74,27 @@ class TTSTrainerWrapper(SFTTrainerWrapper):
             self._require_tts_codec(family)
             from soup_cli.utils.tts_codec import encode_tts_dataset
 
+            codec_name = "XCodec2" if family == "llasa" else tts_codec_package(family)
             console.print(
                 f"[green]TTS live-codec:[/] encoding audio with the "
-                f"{tts_codec_package(family)!r} codec (family={family})"
+                f"{codec_name!r} codec (family={family})"
             )
             # device is set by the SFTTrainerWrapper.__init__; getattr keeps a
             # bare object.__new__ test fixture (no device) working — default
             # None falls through to CPU encoding in encode_tts_dataset.
-            dataset = encode_tts_dataset(
-                dataset,
-                family,
-                device=getattr(self, "device", None),
-                console=console,
-            )
+            encode_device = getattr(self, "device", None)
+            try:
+                dataset = encode_tts_dataset(
+                    dataset,
+                    family,
+                    device=encode_device,
+                    console=console,
+                )
+            finally:
+                if family == "llasa":
+                    from soup_cli.utils.tts_codec import clear_xcodec2_cache
+
+                    clear_xcodec2_cache(encode_device)
 
         # Pre-encoded chat mode: plain SFT cross-entropy over the codec tokens.
         console.print(
@@ -109,7 +117,7 @@ class TTSTrainerWrapper(SFTTrainerWrapper):
                 raise RuntimeError(
                     "Llasa live-codec needs torchaudio for the Transformers-native "
                     "XCodec2 feature extractor. Install the audio extra with "
-                    "pip install soup-cli[audio]."
+                    "pip install \"soup-cli[audio]\"."
                 )
             try:
                 from transformers import Xcodec2Model  # noqa: F401

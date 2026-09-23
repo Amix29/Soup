@@ -315,6 +315,25 @@ def _get_xcodec2_components(device: Optional[str] = None):
     return model, extractor
 
 
+def clear_xcodec2_cache(device: Optional[str] = None) -> None:
+    """Release the cached XCodec2 model after dataset encoding (#1112 review)."""
+    dev = device or "cpu"
+    _XCODEC2_CACHE.pop(dev, None)
+
+    # The live-codec pass runs before the base model/trainer is materialised.
+    # Do not keep a ~2.5 GB fp32 XCodec2 checkpoint resident for the entire run.
+    import gc
+
+    gc.collect()
+    if str(dev).startswith("cuda"):
+        try:
+            import torch
+        except ImportError:  # pragma: no cover - train extra always has torch
+            return
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
 def encode_audio_llasa(
     path: str,
     *,
