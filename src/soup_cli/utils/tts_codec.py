@@ -356,7 +356,8 @@ def csm_live_codec_error() -> RuntimeError:
         "live-codec path: CSM trains 32 Mimi codebooks plus text as parallel "
         "multimodal frames, not audio ids embedded in a text assistant turn. "
         "Use the model's native CSM/AutoProcessor training path; Soup needs a "
-        "dedicated CSM trainer before either data.format=audio or pre-encoded data.format=chatml can be supported safely."
+        "dedicated CSM trainer before either data.format=audio or pre-encoded "
+        "data.format=chatml can be supported safely."
     )
 
 
