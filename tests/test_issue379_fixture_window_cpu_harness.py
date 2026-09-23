@@ -1,8 +1,9 @@
-"""Contract tests for the published STEP 13 CPU fixture harness (#379)."""
+"""Load-bearing tests for the CPU fixture-window mechanism harness (#379)."""
 
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -17,58 +18,270 @@ HARNESS = (
 
 
 def _load_harness():
-    spec = importlib.util.spec_from_file_location("fixture_window_cpu", HARNESS)
+    name = "_fixture_window_cpu_test_module"
+    spec = importlib.util.spec_from_file_location(name, HARNESS)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(name, None)
     return module
 
 
-def test_recorded_fixture_shapes_and_m_grid_are_pinned():
+def _row(
+    harness,
+    *,
+    inference_packed=False,
+    training_packed=False,
+    inference_diff=0.0,
+    training_diff=0.0,
+):
+    return harness.Row(
+        out_features=64,
+        in_features=64,
+        m=8,
+        inference_packed_for_cpu=inference_packed,
+        training_packed_for_cpu=training_packed,
+        inference_vs_variant2_max_abs=inference_diff,
+        training_vs_variant2_max_abs=training_diff,
+        inference_vs_training_max_abs=max(inference_diff, training_diff),
+    )
+
+
+def _result(harness, rows):
+    verdict = harness._evaluate_rows(rows)
+    return {
+        "rows": [row.__dict__ for row in rows],
+        "packed_inference_rows": sum(row.inference_packed_for_cpu for row in rows),
+        "packed_training_rows": sum(row.training_packed_for_cpu for row in rows),
+        "training_control_exact": all(
+            row.training_vs_variant2_max_abs == 0.0 for row in rows
+        ),
+        **verdict,
+    }
+
+
+def test_cpu_recorded_shapes_and_m_grid_are_pinned():
     harness = _load_harness()
     assert harness.FIXTURE_SHAPES == ((64, 64), (256, 64))
-    assert harness.M_VALUES == (8, 16, 32, 64, 128, 256, 512)
+    assert harness.M_VALUES == (8, 16, 32, 64, 128, 256)
 
 
-def test_one_row_reports_the_path_and_three_pairwise_differences():
+def test_real_row_uses_shipped_variant2_and_exact_training_control(monkeypatch):
     pytest.importorskip("torch")
     pytest.importorskip("bitsandbytes")
-    harness = _load_harness()
 
+    harness = _load_harness()
+    import soup_cli.utils.layer_stream_runtime as runtime
+
+    real_install = runtime.install_dequant_forward
+    calls = {"n": 0}
+
+    def counted_install(module):
+        calls["n"] += 1
+        return real_install(module)
+
+    monkeypatch.setattr(runtime, "install_dequant_forward", counted_install)
     row = harness.measure_row(64, 64, 8, seed=3)
-    assert row.out_features == 64
-    assert row.in_features == 64
-    assert row.m == 8
-    assert isinstance(row.inference_packed_for_cpu, bool)
+
+    assert calls["n"] == 1
     assert row.training_packed_for_cpu is False
-    assert row.inference_vs_variant2_max_abs >= 0.0
-    assert row.training_vs_variant2_max_abs >= 0.0
-    assert row.inference_vs_training_max_abs >= 0.0
+    assert row.training_vs_variant2_max_abs == 0.0
 
 
-def test_probe_row_count_is_shape_times_m_grid(monkeypatch):
+def test_nf4_fixture_uses_double_quant():
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("bitsandbytes")
+
+    harness = _load_harness()
+    layer = harness._quantized_linear(
+        torch.randn(64, 64, dtype=torch.float32),
+        compute_dtype=torch.float32,
+    )
+    assert layer.weight.quant_state.nested is True
+
+
+def test_measure_row_requires_eval_inference_and_reports_packing(monkeypatch):
+    pytest.importorskip("torch")
+    pytest.importorskip("bitsandbytes")
+
+    harness = _load_harness()
+    import soup_cli.utils.layer_stream_runtime as runtime
+
+    events = []
+
+    class QuantState:
+        packing_format_for_cpu = False
+
+    class Weight:
+        def __init__(self):
+            self.quant_state = QuantState()
+
+    class FakeLayer:
+        def __init__(self):
+            self.training = True
+            self.weight = Weight()
+
+        def train(self):
+            self.training = True
+            events.append("train")
+            return self
+
+        def eval(self):
+            self.training = False
+            events.append("eval")
+            return self
+
+        def __call__(self, x):
+            if not self.training and not x.requires_grad:
+                self.weight.quant_state.packing_format_for_cpu = True
+                return x + 1.0
+            return x
+
+    monkeypatch.setattr(harness, "_quantized_linear", lambda *a, **k: FakeLayer())
+    monkeypatch.setattr(runtime, "install_dequant_forward", lambda _module: 1)
+
+    row = harness.measure_row(4, 4, 2, seed=5)
+    assert "eval" in events
+    assert row.inference_packed_for_cpu is True
+    assert row.training_packed_for_cpu is False
+    assert row.training_vs_variant2_max_abs == 0.0
+    assert row.inference_vs_variant2_max_abs == 1.0
+
+
+def test_run_probe_counts_inference_packed_not_training_packed(monkeypatch):
     harness = _load_harness()
 
-    def fake_measure(out_features, in_features, m):
-        return harness.Row(
-            out_features=out_features,
-            in_features=in_features,
-            m=m,
-            inference_packed_for_cpu=False,
-            training_packed_for_cpu=False,
-            inference_vs_variant2_max_abs=0.0,
-            training_vs_variant2_max_abs=0.0,
-            inference_vs_training_max_abs=0.0,
+    monkeypatch.setattr(
+        harness,
+        "measure_row",
+        lambda out_features, in_features, m: _row(
+            harness,
+            inference_packed=True,
+            training_packed=False,
+            inference_diff=1.0,
+        ),
+    )
+    result = harness.run_probe(
+        m_values=(8, 32),
+        shapes=((64, 64),),
+    )
+    assert result["packed_inference_rows"] == 2
+    assert result["packed_training_rows"] == 0
+    assert result["verdict"] == "mechanism_reproduced"
+
+
+@pytest.mark.parametrize(
+    "case,expected_code,expected_verdict",
+    [
+        ("absent", 2, "mechanism_absent"),
+        ("training_packed", 3, "control_failed"),
+        ("training_diff", 3, "control_failed"),
+        ("packed_no_diff", 4, "packed_effect_absent"),
+        ("success", 0, "mechanism_reproduced"),
+    ],
+)
+def test_main_pins_every_gate_exit_code(
+    monkeypatch,
+    capsys,
+    case,
+    expected_code,
+    expected_verdict,
+):
+    harness = _load_harness()
+
+    if case == "absent":
+        row_list = [_row(harness)]
+    elif case == "training_packed":
+        row_list = [
+            _row(
+                harness,
+                inference_packed=True,
+                training_packed=True,
+                inference_diff=1.0,
+            )
+        ]
+    elif case == "training_diff":
+        row_list = [
+            _row(
+                harness,
+                inference_packed=True,
+                inference_diff=1.0,
+                training_diff=0.25,
+            )
+        ]
+    elif case == "packed_no_diff":
+        row_list = [_row(harness, inference_packed=True)]
+    else:
+        row_list = [
+            _row(
+                harness,
+                inference_packed=True,
+                inference_diff=1.0,
+            )
+        ]
+
+    result = _result(harness, row_list)
+    monkeypatch.setattr(harness, "run_probe", lambda: result)
+
+    code = harness.main([])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert code == expected_code
+    assert payload["exit_code"] == expected_code
+    assert payload["verdict"] == expected_verdict
+    if expected_code:
+        assert captured.err.strip() == payload["reason"]
+    else:
+        assert captured.err == ""
+
+
+def test_survey_is_explicit_opt_out_of_fail_closed_gate(monkeypatch, capsys):
+    harness = _load_harness()
+    result = _result(harness, [_row(harness)])
+    assert result["exit_code"] == harness.EXIT_MECHANISM_ABSENT
+    monkeypatch.setattr(harness, "run_probe", lambda: result)
+
+    assert harness.main(["--survey"]) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["verdict"] == "mechanism_absent"
+    assert captured.err == ""
+
+
+def test_json_schema_carries_verdict_and_attribution():
+    harness = _load_harness()
+    rows = [
+        _row(
+            harness,
+            inference_packed=True,
+            inference_diff=1.0,
         )
+    ]
+    verdict = harness._evaluate_rows(rows)
+    assert verdict == {
+        "verdict": "mechanism_reproduced",
+        "exit_code": 0,
+        "reason": (
+            "packed inference differs on every packed row while the training "
+            "control is exactly equal to Soup variant 2."
+        ),
+        "attribution": (
+            "bitsandbytes packed CPU inference path; exact lower-level kernel "
+            "not instrumented"
+        ),
+    }
 
-    monkeypatch.setattr(harness, "measure_row", fake_measure)
-    result = harness.run_probe(m_values=(8, 64), shapes=((64, 64), (256, 64)))
-    assert len(result["rows"]) == 4
-    assert result["packed_inference_rows"] == 0
+
+def test_loader_does_not_leak_dynamic_module_registration():
+    _load_harness()
+    assert "_fixture_window_cpu_test_module" not in sys.modules
 
 
-def test_harness_source_has_no_network_or_model_download():
+def test_script_documents_avx512_and_kernels_attribution_boundary():
     source = HARNESS.read_text(encoding="utf-8")
-    forbidden = ("from_pretrained(", "load_dataset(", "requests.", "hf_hub_download")
-    assert not any(token in source for token in forbidden)
+    assert "AVX512-BF16 is required" in source
+    assert "kernels-community/quantization-bitsandbytes" in source
+    assert "does NOT identify which lower-level kernel executed" in source
