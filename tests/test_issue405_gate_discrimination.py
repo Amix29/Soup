@@ -5,9 +5,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from soup_cli.eval.gate_suites import load_suite_items, tool_names_in_prompt
 
-RECORD = Path("benchmarks/gate-v0.75.2-tool-call-discrimination.md")
+RECORD = (
+    Path(__file__).resolve().parents[1]
+    / "benchmarks"
+    / "gate-v0.76.0-tool-call-discrimination.md"
+)
 
 
 def _no_tool_rows() -> tuple[dict, ...]:
@@ -77,7 +83,31 @@ class TestNoToolScoring:
     def test_answering_in_prose_does_not_satisfy_the_exact_contract(self):
         from soup_cli.eval.gate_suites import _score_tool_call
 
-        assert _score_tool_call(_no_tool_rows(), lambda _prompt: "Paris") == 0.0
+        rows = _no_tool_rows()
+        assert rows
+        assert _score_tool_call(rows, lambda _prompt: "Paris") == 0.0
+
+    @pytest.mark.parametrize(
+        "output",
+        [
+            "NO_TOOL. I can answer directly.",
+            "```NO_TOOL```",
+            "no_tool",
+        ],
+    )
+    def test_near_miss_no_tool_outputs_do_not_satisfy_exact_contract(self, output):
+        from soup_cli.eval.gate_suites import _score_tool_call
+
+        rows = _no_tool_rows()
+        assert rows
+        assert _score_tool_call(rows, lambda _prompt: output) == 0.0
+
+    def test_exact_no_tool_contract_ignores_surrounding_whitespace(self):
+        from soup_cli.eval.gate_suites import _score_tool_call
+
+        rows = _no_tool_rows()
+        assert rows
+        assert _score_tool_call(rows, lambda _prompt: "  NO_TOOL\n") == 1.0
 
     def test_calling_a_visible_distractor_fails_every_no_tool_row(self):
         from soup_cli.eval.gate_suites import _score_tool_call

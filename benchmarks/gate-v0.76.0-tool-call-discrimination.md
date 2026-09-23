@@ -1,9 +1,9 @@
-# v0.75.2 gate: tool-call discrimination (#405)
+# v0.76.0 gate: tool-call discrimination (#405)
 
 `mini_tool_call` had reached a ceiling: the strong reference model selected the
 right tool on every shipped row. This record measures the old scale, rejects an
 initial replacement that remained pinned near the ceiling, and records the
-fixture selected for v0.75.2.
+fixture selected for v0.76.0.
 
 ## Environment and method
 
@@ -68,7 +68,7 @@ old scale and Soup will warn rather than silently compare them with revision 2.
 
 ## Exact-abstention packaging cost
 
-A follow-up maintainer run on Mistral-7B-Instruct measured 12 misses on the
+A follow-up maintainer run on Mistral-7B-Instruct-v0.3 (NF4) measured 12 misses on the
 NO_TOOL axis: 10 were genuine tool over-calls and 2 were outputs that began
 with NO_TOOL and then added an explanation. Thus 2/12 (about 17%) of those
 misses are attributable to the intentionally exact packaging contract rather

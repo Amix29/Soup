@@ -411,7 +411,7 @@ Each suite is >20 items so a single-item flip (1/N < 0.05) trips the default thr
 of being rounded away. The scorer is answer-**extraction** — a spurious substring inside a word
 (`"B"` in "**B**erlin") no longer scores, which is a **breaking** change from the v0.25.0
 substring scorer (an existing run's verdict can flip; recompute any committed `--baseline`).
-As of v0.75.2, `mini_tool_call` mixes tool calls with direct-answer prompts and requires the
+As of v0.76.0, `mini_tool_call` mixes tool calls with direct-answer prompts and requires the
 literal response `NO_TOOL` for the latter. This deliberately moves the suite away from its former
 1.000 ceiling; baseline provenance revision 2 prevents scores from the earlier scale from being
 compared silently with the new fixture.
