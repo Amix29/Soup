@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 from typer.testing import CliRunner
+
+_SGR = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _clean_output(text: str) -> str:
+    return " ".join(_SGR.sub("", text).split())
 
 
 def _adapter(tmp_path, monkeypatch):
@@ -313,11 +320,14 @@ def test_cli_cert_identity_rejects_unsigned_backend_in_both_modes(
 
     result = CliRunner().invoke(app, args)
     assert result.exit_code == expected_exit, result.output
-    normalized = " ".join(result.output.split())
+    normalized = _clean_output(result.output)
     assert "requires a sigstore signature" in normalized
 
 
-def test_cli_sigstore_error_strips_terminal_control_bytes(tmp_path, monkeypatch):
+@pytest.mark.parametrize(("strict", "code"), [(False, 1), (True, 3)])
+def test_cli_sigstore_error_strips_terminal_control_bytes(
+    tmp_path, monkeypatch, strict, code
+):
     from soup_cli.commands.adapters import app
     from soup_cli.utils.adapter_sign import sign_adapter
 
@@ -326,21 +336,39 @@ def test_cli_sigstore_error_strips_terminal_control_bytes(tmp_path, monkeypatch)
     _fake_sigstore(monkeypatch, verify_error=attack)
     sign_adapter(str(adir), backend="sigstore")
 
-    result = CliRunner().invoke(
-        app,
-        [
-            "verify",
-            str(adir),
-            "--cert-identity",
-            "trusted@example.com",
-            "--cert-oidc-issuer",
-            "https://issuer.example",
-        ],
-    )
-    assert result.exit_code == 1, result.output
-    assert "\x1b" not in result.output
-    assert "\x07" not in result.output
-    assert "SPOOFED-TITLE" in result.output
+    args = [
+        "verify",
+        str(adir),
+        "--cert-identity",
+        "trusted@example.com",
+        "--cert-oidc-issuer",
+        "https://issuer.example",
+    ]
+    if strict:
+        args.append("--strict")
+
+    result = CliRunner().invoke(app, args)
+    assert result.exit_code == code, result.output
+    out = _SGR.sub("", result.output)
+    assert "\x1b" not in out and "\x07" not in out
+    assert "SPOOFED-TITLE" in out
+
+
+def test_cli_record_backend_field_strips_terminal_control_bytes(tmp_path, monkeypatch):
+    from soup_cli.commands.adapters import app
+    from soup_cli.utils.adapter_sign import sign_adapter
+
+    adir = _adapter(tmp_path, monkeypatch)
+    sign_adapter(str(adir), backend="unsigned")
+    sig = adir / ".soup-signature.json"
+    rec = json.loads(sig.read_text(encoding="utf-8"))
+    rec["backend"] = "x\x1b]0;SPOOFED\x07\x1b[2J"
+    sig.write_text(json.dumps(rec), encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["verify", str(adir)])
+    out = _SGR.sub("", result.output)
+    assert "\x1b" not in out and "\x07" not in out
+    assert "SPOOFED" in out
 
 
 def test_interactive_oidc_refuses_non_sigstore_backend(tmp_path, monkeypatch):

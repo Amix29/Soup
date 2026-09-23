@@ -191,7 +191,8 @@ def test_verify_policy_receives_identity_and_issuer(monkeypatch):
     assert seen["bundle"] == "bundle-object"
 
 
-def test_verify_helper_rejects_empty_issuer_before_policy(monkeypatch):
+@pytest.mark.parametrize("issuer", ["", "   "])
+def test_verify_helper_rejects_empty_issuer_before_policy(monkeypatch, issuer):
     from soup_cli.utils.sigstore_signing import verify_payload_sigstore
 
     seen = _install_fake_verify_sigstore(monkeypatch)
@@ -200,7 +201,7 @@ def test_verify_helper_rejects_empty_issuer_before_policy(monkeypatch):
             b"payload",
             '{"bundle":"ok"}',
             identity="trusted@example.com",
-            issuer="",
+            issuer=issuer,
         )
 
     assert "issuer" not in seen
