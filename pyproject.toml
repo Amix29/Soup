@@ -166,10 +166,10 @@ remote = ["fsspec>=2024.1.0", "s3fs>=2024.1.0", "gcsfs>=2024.1.0", "adlfs>=2024.
 mix = ["scikit-optimize>=0.9.0"]
 # v0.53.10 #113 — optional language detection and PII analysis.
 data-pro = ["langdetect>=1.0.9", "presidio-analyzer>=2.2.0"]
-# v0.71.2 #179/#185 — ed25519 detached signing for `soup attest` / `soup
-# adapters sign`. Pure-offline; Sigstore keyless (OIDC + Fulcio/Rekor network)
-# stays infra-blocked and is NOT bundled here.
-sign = ["cryptography>=41.0.0"]
+# v0.75.0 #179/#185 — ed25519 offline signing plus Sigstore keyless bundles
+# for `soup attest` / `soup adapters sign`. Sigstore stays lazy and only runs
+# when the explicit sigstore backend is selected.
+sign = ["cryptography>=41.0.0", "sigstore>=4.4.0,<5.0.0"]
 # v0.71.3 #181 — reportlab PDF rendering for `soup train --annex-xi *.pdf`.
 pdf = ["reportlab>=4.0.0"]
 # v0.71.3 #180 — codecarbon offline energy/CO2 measurement for
