@@ -39,6 +39,7 @@ class TestTtsCodecPackage:
         for fam in ("orpheus", "sesame_csm", "llasa", "spark", "oute"):
             assert tts_codec_package(fam) == TTS_CODEC_PACKAGES[fam]
         assert tts_codec_package("orpheus") == "snac"
+        assert tts_codec_package("llasa") == "torchaudio"
         assert tts_codec_package("spark") == "sparktts"
 
     def test_case_insensitive(self):

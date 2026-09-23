@@ -5094,6 +5094,15 @@ class SoupConfig(BaseModel):
                     "task='tts' requires training.tts_family in "
                     "(orpheus, sesame_csm, llasa, spark, oute)"
                 )
+            if tcfg.tts_family == "sesame_csm":
+                raise ValueError(
+                    "training.tts_family='sesame_csm' is not supported by Soup yet: "
+                    "CSM trains text plus 32 Mimi codebooks as parallel multimodal "
+                    "frames, so neither raw data.format='audio' nor pre-encoded "
+                    "data.format='chatml' is a valid text-SFT substitute. Use the "
+                    "model's native CSM/AutoProcessor training path until Soup has "
+                    "a dedicated CSM trainer."
+                )
             if tcfg.tts_emotion is not None:
                 try:
                     validate_emotion_tag(tcfg.tts_emotion, family=tcfg.tts_family)

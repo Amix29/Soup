@@ -220,7 +220,7 @@ def validate_tts_compat(*, task: str, modality: str, backend: str) -> None:
 TTS_CODEC_PACKAGES: Mapping[str, str] = MappingProxyType({
     "orpheus": "snac",
     "sesame_csm": "moshi",
-    "llasa": "xcodec2",
+    "llasa": "torchaudio",
     "spark": "sparktts",
     "oute": "outetts",
 })
