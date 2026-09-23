@@ -91,7 +91,12 @@ class TestNoToolScoring:
         "output",
         [
             "NO_TOOL. I can answer directly.",
+            "NO_TOOL\nI can answer directly.",
+            "NO_TOOL.",
             "```NO_TOOL```",
+            "```\nNO_TOOL\n```",
+            "```text\nNO_TOOL\n```",
+            "`NO_TOOL`",
             "no_tool",
         ],
     )
