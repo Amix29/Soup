@@ -79,7 +79,7 @@ def verify_payload_sigstore(
         from sigstore.verify import Verifier
         from sigstore.verify.policy import Identity
     except ImportError as exc:
-        raise _missing_sigstore(exc) from exc
+        raise RuntimeError(str(_missing_sigstore(exc))) from exc
 
     try:
         bundle = Bundle.from_json(bundle_json)
