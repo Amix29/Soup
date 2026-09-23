@@ -114,11 +114,15 @@ def emit_cmd(
 
         try:
             enforce_under_cwd_and_no_symlink(output, "--output")
+            if os.path.isdir(output):
+                raise ValueError("--output must name a file, not a directory")
             if normalized_backend in {"ed25519", "sigstore"}:
-                enforce_under_cwd_and_no_symlink(
-                    output + _SIGNATURE_SUFFIX,
-                    "signature sidecar",
-                )
+                sidecar_path = output + _SIGNATURE_SUFFIX
+                enforce_under_cwd_and_no_symlink(sidecar_path, "signature sidecar")
+                if os.path.isdir(sidecar_path):
+                    raise ValueError(
+                        "signature sidecar path must name a file, not a directory"
+                    )
         except (TypeError, ValueError) as exc:
             console.print(f"[red]Invalid output: {for_terminal(exc)}[/]")
             raise typer.Exit(_EXIT_USAGE) from exc
@@ -154,8 +158,8 @@ def emit_cmd(
             sig.get("signature") or sig.get("sigstore_bundle")
         ):
             written_paths.append(_write_sig_sidecar(output, sig))
-    except (TypeError, ValueError) as exc:
-        console.print(f"[red]Write failed: {escape(str(exc))}[/]")
+    except (TypeError, ValueError, OSError) as exc:
+        console.print(f"[red]Write failed: {for_terminal(exc)}[/]")
         raise typer.Exit(2)
     console.print(
         f"[green]Wrote attestation[/] -> {escape(written)} "
