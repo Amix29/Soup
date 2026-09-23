@@ -28,7 +28,6 @@ def _make_model(
 ):
     _deps()
     import torch.nn as nn
-    import torch.nn.functional as functional
     from peft import LoraConfig, inject_adapter_in_model
 
     class TinyMLP(nn.Module):
