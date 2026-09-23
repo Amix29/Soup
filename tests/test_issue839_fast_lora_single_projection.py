@@ -855,9 +855,10 @@ class TestNf4Parity:
 
         assert patch_fast_lora_single_projection(model) == 1
         out = layer(x)
+        assert type(out.grad_fn).__name__ == "_FastLoraSingleProjectionBackward"
         out.sum().backward()
 
-        # Loose on purpose: the fused-vs-dequant divergence pinned by #968 is
+        # Loose on purpose: the fused-vs-dequant divergence pinned by #776 is
         # part of this delta, and its magnitude on this shape is unmeasured
         # without a card. The PR asks for the readout from the first CUDA run.
         atol = 1e-2
@@ -945,8 +946,9 @@ class TestTheFastPathIsActuallyTaken:
     """
 
     @pytest.mark.parametrize("bias", [True, False], ids=["bias", "no-bias"])
-    @pytest.mark.parametrize("shape", [(4, 8), (2, 3, 8)], ids=["2d", "3d"])  # [N, in] / [B, S, in]
-    def test_the_output_carries_the_kernels_own_grad_fn(self, bias, shape):
+    @pytest.mark.parametrize("shape", [(4, 8), (2, 3, 8)], ids=["2d", "3d"])
+    @pytest.mark.parametrize("dtype_name", ["float32", "bfloat16"], ids=["fp32", "bf16"])
+    def test_the_output_carries_the_kernels_own_grad_fn(self, bias, shape, dtype_name):
         """The kernel's Function node, not peft's, is what built this output.
 
         ``grad_fn`` is the positive edge: the name is produced by the autograd
@@ -969,8 +971,10 @@ class TestTheFastPathIsActuallyTaken:
         from soup_cli.utils.fast_lora import patch_fast_lora_single_projection
 
         torch.manual_seed(0)
+        dtype = getattr(torch, dtype_name)
         model, layer = _make_adapted_linear(bias=bias)
-        x = torch.randn(*shape, requires_grad=True)
+        model = model.to(dtype=dtype)
+        x = torch.randn(*shape, dtype=dtype, requires_grad=True)
 
         before = layer(x)
         assert type(before.grad_fn).__name__ != "_FastLoraSingleProjectionBackward", (
