@@ -613,7 +613,7 @@ trusted public keys are symlink-rejected and size-capped but **not**
 cwd-contained (keys are secrets that live outside the project). Signature
 persists as `.soup-signature.json` (atomic write).
 
-The **`sigstore` backend is also live** with `pip install soup-cli[sign]`.
+The **`sigstore` backend is also live** with `pip install soup-cli[sigstore]`.
 It uses an ambient OIDC identity when one is available (for example GitHub
 Actions), requests a Fulcio certificate, submits to Rekor, and stores the
 complete Sigstore bundle with the adapter signature record. Browser OIDC is

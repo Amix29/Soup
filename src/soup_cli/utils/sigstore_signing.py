@@ -8,8 +8,8 @@ from __future__ import annotations
 
 def _missing_sigstore(exc: Exception) -> ValueError:
     return ValueError(
-        "Sigstore support requires the optional signing extra: "
-        "pip install soup-cli[sign] (sigstore>=4.4,<5)."
+        "Sigstore support requires the optional Sigstore extra: "
+        "pip install soup-cli[sigstore] (sigstore>=4.4,<5)."
     )
 
 
@@ -26,26 +26,32 @@ def sign_payload_sigstore(payload: bytes, *, interactive: bool = False) -> str:
     except ImportError as exc:
         raise _missing_sigstore(exc) from exc
 
+    # Keep Soup's deliberate "no ambient credential" refusal distinct from
+    # sigstore-internal ValueErrors/ValidationErrors. The latter are runtime
+    # signing failures, not CLI-usage errors.
     try:
         trust = ClientTrustConfig.production()
         raw_token = detect_credential()
+    except Exception as exc:
+        raise RuntimeError(f"Sigstore keyless signing failed: {exc}") from exc
+
+    if raw_token is None and not interactive:
+        raise ValueError(
+            "No ambient Sigstore OIDC credential was detected. "
+            "Use an OIDC-enabled environment, or opt into the browser flow "
+            "explicitly with --interactive-oidc."
+        )
+
+    try:
         if raw_token is None:
-            if not interactive:
-                raise ValueError(
-                    "No ambient Sigstore OIDC credential was detected. "
-                    "Use an OIDC-enabled environment, or opt into the browser flow "
-                    "explicitly with --interactive-oidc."
-                )
-            issuer = Issuer(trust.signing_config.get_oidc_url())
-            token = issuer.identity_token()
+            oidc_issuer = Issuer(trust.signing_config.get_oidc_url())
+            token = oidc_issuer.identity_token()
         else:
             token = IdentityToken(raw_token)
         context = SigningContext.from_trust_config(trust)
         with context.signer(token, cache=False) as signer:
             bundle = signer.sign_artifact(payload)
         return bundle.to_json()
-    except ValueError:
-        raise
     except Exception as exc:
         raise RuntimeError(f"Sigstore keyless signing failed: {exc}") from exc
 

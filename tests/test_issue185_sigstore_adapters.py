@@ -275,3 +275,81 @@ def test_cli_interactive_oidc_is_explicitly_threaded(tmp_path, monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert seen["sigstore_interactive"] is True
+
+
+def test_strict_cert_identity_rejects_unsigned_backend_api(tmp_path, monkeypatch):
+    from soup_cli.utils.adapter_sign import sign_adapter, verify_adapter
+
+    adir = _adapter(tmp_path, monkeypatch)
+    sign_adapter(str(adir), backend="unsigned")
+    with pytest.raises(ValueError, match="requires a sigstore signature"):
+        verify_adapter(
+            str(adir),
+            strict=True,
+            sigstore_identity="trusted@example.com",
+            sigstore_oidc_issuer="https://issuer.example",
+        )
+
+
+@pytest.mark.parametrize(("strict", "expected_exit"), [(False, 1), (True, 3)])
+def test_cli_cert_identity_rejects_unsigned_backend_in_both_modes(
+    tmp_path, monkeypatch, strict, expected_exit
+):
+    from soup_cli.commands.adapters import app
+    from soup_cli.utils.adapter_sign import sign_adapter
+
+    adir = _adapter(tmp_path, monkeypatch)
+    sign_adapter(str(adir), backend="unsigned")
+    args = [
+        "verify",
+        str(adir),
+        "--cert-identity",
+        "trusted@example.com",
+        "--cert-oidc-issuer",
+        "https://issuer.example",
+    ]
+    if strict:
+        args.append("--strict")
+
+    result = CliRunner().invoke(app, args)
+    assert result.exit_code == expected_exit, result.output
+    normalized = " ".join(result.output.split())
+    assert "requires a sigstore signature" in normalized
+
+
+def test_cli_sigstore_error_strips_terminal_control_bytes(tmp_path, monkeypatch):
+    from soup_cli.commands.adapters import app
+    from soup_cli.utils.adapter_sign import sign_adapter
+
+    adir = _adapter(tmp_path, monkeypatch)
+    attack = "\x1b]0;SPOOFED-TITLE\x07\x1b[2J\x1b[H\x1b[32mValid: True\x1b[0m"
+    _fake_sigstore(monkeypatch, verify_error=attack)
+    sign_adapter(str(adir), backend="sigstore")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "verify",
+            str(adir),
+            "--cert-identity",
+            "trusted@example.com",
+            "--cert-oidc-issuer",
+            "https://issuer.example",
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    assert "\x1b" not in result.output
+    assert "\x07" not in result.output
+    assert "SPOOFED-TITLE" in result.output
+
+
+def test_interactive_oidc_refuses_non_sigstore_backend(tmp_path, monkeypatch):
+    from soup_cli.commands.adapters import app
+
+    adir = _adapter(tmp_path, monkeypatch)
+    result = CliRunner().invoke(
+        app,
+        ["sign", str(adir), "--backend", "unsigned", "--interactive-oidc"],
+    )
+    assert result.exit_code == 2, result.output
+    assert "--interactive-oidc requires --backend sigstore" in result.output

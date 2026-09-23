@@ -147,7 +147,7 @@ class TestSign:
             return real_import(name, *args, **kwargs)
 
         monkeypatch.setattr(builtins, "__import__", force_missing_sigstore)
-        with pytest.raises(ValueError, match=r"soup-cli\[sign\]"):
+        with pytest.raises(ValueError, match=r"soup-cli\[sigstore\]"):
             sign_adapter(str(adapter), backend="sigstore")
 
     def test_sign_ed25519_now_live(self, tmp_path, monkeypatch):

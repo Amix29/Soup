@@ -1263,7 +1263,7 @@ def sign(
     hash. ``ed25519`` (v0.71.2 #185) adds a real detached signature over that
     root — pass ``--key <priv.pem>``, set ``SOUP_SIGNING_KEY``, or use
     ``--generate-key <out.pem>``. ``sigstore`` uses keyless OIDC plus the
-    Sigstore public-good Fulcio/Rekor service; install ``soup-cli[sign]`` and
+    Sigstore public-good Fulcio/Rekor service; install ``soup-cli[sigstore]`` and
     run in an ambient-OIDC environment (for example GitHub Actions). Browser
     OIDC is opt-in with --interactive-oidc.
     """
@@ -1278,13 +1278,13 @@ def sign(
             sigstore_interactive=interactive_oidc,
         )
     except FileNotFoundError as exc:
-        console.print(f"[red]{escape(str(exc))}[/]")
+        console.print(f"[red]{for_terminal(exc)}[/]")
         raise typer.Exit(1) from exc
     except (ValueError, TypeError) as exc:
-        console.print(f"[red]{escape(str(exc))}[/]")
+        console.print(f"[red]{for_terminal(exc)}[/]")
         raise typer.Exit(2) from exc
     except RuntimeError as exc:
-        console.print(f"[red]{escape(str(exc))}[/]")
+        console.print(f"[red]{for_terminal(exc)}[/]")
         raise typer.Exit(1) from exc
 
     if generate_key and record.backend == "ed25519":
@@ -1352,28 +1352,28 @@ def verify(
             sigstore_oidc_issuer=cert_oidc_issuer,
         )
     except FileNotFoundError as exc:
-        console.print(f"[red]{escape(str(exc))}[/]")
+        console.print(f"[red]{for_terminal(exc)}[/]")
         raise typer.Exit(1) from exc
     except ValueError as exc:
         # Strict mode raises; non-strict gives a report.
-        console.print(f"[red]{escape(str(exc))}[/]")
+        console.print(f"[red]{for_terminal(exc)}[/]")
         raise typer.Exit(3) from exc
     except TypeError as exc:
-        console.print(f"[red]{escape(str(exc))}[/]")
+        console.print(f"[red]{for_terminal(exc)}[/]")
         raise typer.Exit(2) from exc
 
     status_color = "green" if report.valid else "yellow"
     panel = Panel(
-        f"Adapter:    [bold]{escape(report.adapter)}[/]\n"
+        f"Adapter:    [bold]{for_terminal(report.adapter)}[/]\n"
         f"Valid:      [{status_color}]{report.valid}[/]\n"
-        f"Backend:    [bold]{escape(report.backend or '—')}[/]\n"
-        f"Reason:     {escape(report.reason)}",
+        f"Backend:    [bold]{for_terminal(report.backend or '—')}[/]\n"
+        f"Reason:     {for_terminal(report.reason)}",
         title="Adapter verify",
     )
     console.print(panel)
     if report.findings:
         for finding in report.findings:
-            console.print(f"  [yellow]- {escape(finding)}[/]")
+            console.print(f"  [yellow]- {for_terminal(finding)}[/]")
 
     if not report.valid:
         raise typer.Exit(1)

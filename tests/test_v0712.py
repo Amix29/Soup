@@ -357,7 +357,7 @@ class TestAdapterSignEd25519:
 
         monkeypatch.setattr(builtins, "__import__", force_missing_sigstore)
         adir = _write_fake_adapter(tmp_path)
-        with pytest.raises(ValueError, match=r"soup-cli\[sign\]"):
+        with pytest.raises(ValueError, match=r"soup-cli\[sigstore\]"):
             sign_adapter(str(adir), backend="sigstore")
 
     def test_unsigned_still_works(self, tmp_path, monkeypatch):
@@ -1069,7 +1069,7 @@ class TestCli:
         adir = _write_fake_adapter(tmp_path)
         r = CliRunner().invoke(app, ["sign", str(adir), "--backend", "sigstore"])
         assert r.exit_code == 2, r.output
-        assert "soup-cli[sign]" in _strip_ansi(r.output)
+        assert "soup-cli[sigstore]" in _strip_ansi(r.output)
 
 
 # ---------------------------------------------------------------------------

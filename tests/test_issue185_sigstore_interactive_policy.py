@@ -124,3 +124,99 @@ def test_ambient_oidc_never_needs_browser_opt_in(monkeypatch):
     assert not any(
         isinstance(event, tuple) and event[0] == "issuer" for event in events
     )
+
+
+def _install_fake_verify_sigstore(monkeypatch):
+    seen = {}
+
+    root = ModuleType("sigstore")
+    root.__path__ = []
+
+    models = ModuleType("sigstore.models")
+
+    class Bundle:
+        @classmethod
+        def from_json(cls, value):
+            seen["bundle_json"] = value
+            return "bundle-object"
+
+    models.Bundle = Bundle
+
+    verify = ModuleType("sigstore.verify")
+
+    class FakeVerifier:
+        def verify_artifact(self, payload, bundle, policy):
+            seen.update(payload=payload, bundle=bundle, policy=policy)
+
+    class Verifier:
+        @classmethod
+        def production(cls):
+            seen["verifier_production"] = True
+            return FakeVerifier()
+
+    verify.Verifier = Verifier
+
+    policy_mod = ModuleType("sigstore.verify.policy")
+
+    class Identity:
+        def __init__(self, *, identity, issuer):
+            seen["identity"] = identity
+            seen["issuer"] = issuer
+            self.identity = identity
+            self.issuer = issuer
+
+    policy_mod.Identity = Identity
+
+    monkeypatch.setitem(sys.modules, "sigstore", root)
+    monkeypatch.setitem(sys.modules, "sigstore.models", models)
+    monkeypatch.setitem(sys.modules, "sigstore.verify", verify)
+    monkeypatch.setitem(sys.modules, "sigstore.verify.policy", policy_mod)
+    return seen
+
+
+def test_verify_policy_receives_identity_and_issuer(monkeypatch):
+    from soup_cli.utils.sigstore_signing import verify_payload_sigstore
+
+    seen = _install_fake_verify_sigstore(monkeypatch)
+    verify_payload_sigstore(
+        b"payload",
+        '{"bundle":"ok"}',
+        identity="trusted@example.com",
+        issuer="https://issuer.example",
+    )
+
+    assert seen["identity"] == "trusted@example.com"
+    assert seen["issuer"] == "https://issuer.example"
+    assert seen["payload"] == b"payload"
+    assert seen["bundle"] == "bundle-object"
+
+
+def test_verify_helper_rejects_empty_issuer_before_policy(monkeypatch):
+    from soup_cli.utils.sigstore_signing import verify_payload_sigstore
+
+    seen = _install_fake_verify_sigstore(monkeypatch)
+    with pytest.raises(ValueError, match="non-empty trusted OIDC issuer"):
+        verify_payload_sigstore(
+            b"payload",
+            '{"bundle":"ok"}',
+            identity="trusted@example.com",
+            issuer="",
+        )
+
+    assert "issuer" not in seen
+
+
+def test_sigstore_internal_value_error_is_runtime_failure(monkeypatch):
+    from soup_cli.utils.sigstore_signing import sign_payload_sigstore
+
+    _install_fake_sigstore(monkeypatch, credential="ambient-token")
+
+    class BrokenContext:
+        @classmethod
+        def from_trust_config(cls, _trust):
+            raise ValueError("internal validation failed")
+
+    sys.modules["sigstore.sign"].SigningContext = BrokenContext
+
+    with pytest.raises(RuntimeError, match="Sigstore keyless signing failed"):
+        sign_payload_sigstore(b"payload")
