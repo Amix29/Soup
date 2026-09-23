@@ -315,15 +315,17 @@ class TestAttestSigstoreReviewFollowups:
         assert seen["interactive"] is True
 
     @pytest.mark.parametrize(
-        "extra_args",
+        ("sign_value", "extra_args"),
         [
-            [],
-            ["--attach-to-registry", "entry-1"],
-            ["--output", "../outside.json"],
+            ("sigstore", []),
+            ("SIGSTORE", []),
+            ("Sigstore", []),
+            ("sigstore", ["--attach-to-registry", "entry-1"]),
+            ("sigstore", ["--output", "../outside.json"]),
         ],
     )
     def test_invalid_local_args_refuse_before_sigstore_signing(
-        self, tmp_path, monkeypatch, extra_args
+        self, tmp_path, monkeypatch, sign_value, extra_args
     ):
         import soup_cli.commands.attest as attest_cmd
 
@@ -344,11 +346,62 @@ class TestAttestSigstoreReviewFollowups:
             "--sha",
             "a" * 64,
             "--sign",
-            "sigstore",
+            sign_value,
             *extra_args,
         ]
         result = CliRunner().invoke(attest_cmd.app, args)
 
+        assert result.exit_code == 2, result.output
+        assert called["sign"] is False
+
+    @pytest.mark.requires_symlink
+    @pytest.mark.parametrize("which", ["output", "sidecar"])
+    def test_symlink_output_paths_refuse_before_sigstore_signing(
+        self, tmp_path, monkeypatch, which
+    ):
+        import soup_cli.commands.attest as attest_cmd
+
+        monkeypatch.chdir(tmp_path)
+        called = {"sign": False}
+
+        def should_not_sign(*args, **kwargs):
+            called["sign"] = True
+            raise AssertionError("Sigstore signing ran before symlink validation")
+
+        monkeypatch.setattr(attest_cmd, "sign_attestation", should_not_sign)
+        output = tmp_path / "att.json"
+        target = tmp_path / "target"
+        target.write_text("target", encoding="utf-8")
+        link = output if which == "output" else tmp_path / "att.json.sig"
+        link.symlink_to(target)
+
+        result = CliRunner().invoke(
+            attest_cmd.app, TestAttestSigstoreCli()._emit_args(output)
+        )
+        assert result.exit_code == 2, result.output
+        assert called["sign"] is False
+
+    @pytest.mark.parametrize("which", ["output", "sidecar"])
+    def test_directory_output_paths_refuse_before_sigstore_signing(
+        self, tmp_path, monkeypatch, which
+    ):
+        import soup_cli.commands.attest as attest_cmd
+
+        monkeypatch.chdir(tmp_path)
+        called = {"sign": False}
+
+        def should_not_sign(*args, **kwargs):
+            called["sign"] = True
+            raise AssertionError("Sigstore signing ran before directory validation")
+
+        monkeypatch.setattr(attest_cmd, "sign_attestation", should_not_sign)
+        output = tmp_path / "att.json"
+        directory = output if which == "output" else tmp_path / "att.json.sig"
+        directory.mkdir()
+
+        result = CliRunner().invoke(
+            attest_cmd.app, TestAttestSigstoreCli()._emit_args(output)
+        )
         assert result.exit_code == 2, result.output
         assert called["sign"] is False
 
@@ -484,9 +537,44 @@ class TestAttestSigstoreReviewFollowups:
         )
 
         assert result.exit_code == 3, result.output
-        assert "\x1b" not in result.output
-        assert "\x07" not in result.output
-        assert "SPOOFED-TITLE" in result.output
+        out = _strip_ansi(result.output)
+        assert "\x1b" not in out
+        assert "\x07" not in out
+        assert "SPOOFED-TITLE" in out
+
+    def test_missing_sigstore_extra_uses_unavailable_exit(self, tmp_path, monkeypatch):
+        import builtins
+
+        import soup_cli.commands.attest as attest_cmd
+
+        monkeypatch.chdir(tmp_path)
+        statement, sidecar = TestAttestSigstoreCli()._write_verify_pair(tmp_path)
+        real_import = builtins.__import__
+
+        def force_missing_sigstore(name, *args, **kwargs):
+            if name == "sigstore" or name.startswith("sigstore."):
+                raise ImportError("forced missing sigstore")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", force_missing_sigstore)
+        result = CliRunner().invoke(
+            attest_cmd.app,
+            [
+                "verify",
+                str(statement),
+                "--signature",
+                str(sidecar),
+                "--cert-identity",
+                "trusted@example.com",
+                "--cert-oidc-issuer",
+                "https://issuer.example",
+            ],
+        )
+
+        assert result.exit_code == 1, result.output
+        out = _strip_ansi(result.output)
+        assert "Sigstore verification unavailable" in out
+        assert "soup-cli[sigstore]" in out
 
     def test_interactive_oidc_refuses_non_sigstore_backend(
         self, tmp_path, monkeypatch
