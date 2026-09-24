@@ -143,7 +143,11 @@ def _projection_state(
     cannot drift between patchers.
     """
     lora_a_map = getattr(proj, "lora_A", None)
+    if lora_a_map is not None and not _is_supported_lora_projection(proj):
+        return None
     base = proj.get_base_layer() if hasattr(proj, "get_base_layer") else proj
+    if not hasattr(base, "weight"):
+        return None
 
     adapter = None
     if lora_a_map is None:
@@ -213,6 +217,25 @@ def _projection_state(
         qparts,
         compute_dtype,
     )
+
+
+def _supported_lora_projection_types() -> tuple[type, ...]:
+    """Return PEFT projection types whose weight contracts the kernels model."""
+    from peft.tuners.lora import Linear as LoraLinear
+
+    supported: tuple[type, ...] = (LoraLinear,)
+    try:
+        from peft.tuners.lora import bnb as lora_bnb
+
+        supported = (LoraLinear, lora_bnb.Linear4bit)
+    except Exception:  # noqa: BLE001 - bitsandbytes absence is a normal install
+        pass
+    return supported
+
+
+def _is_supported_lora_projection(proj: Any) -> bool:
+    """Exclude PEFT 8-bit/custom layers whose storage math differs."""
+    return isinstance(proj, _supported_lora_projection_types())
 
 
 def _dense_weight(
@@ -365,7 +388,7 @@ def _make_patched_forward(original_forward: Any) -> Any:
             state.scaling,
             None if state.qmeta is None else _rebuild_quant_state(state.qmeta, state.qparts),
         )
-        return out if out.dtype == input_dtype else out.to(input_dtype)
+        return out if work_x is x else out.to(input_dtype)
 
     return _fast_lora_single_forward
 
@@ -379,15 +402,7 @@ def patch_fast_lora_single_projection(model: Any) -> int:
     """
     import types
 
-    from peft.tuners.lora import Linear as LoraLinear
-
-    types_to_match: tuple[type, ...] = (LoraLinear,)
-    try:
-        from peft.tuners.lora import bnb as lora_bnb
-
-        types_to_match = (LoraLinear, lora_bnb.Linear4bit)
-    except Exception:  # noqa: BLE001 - bitsandbytes absence is a normal install
-        pass
+    types_to_match = _supported_lora_projection_types()
 
     targets = []
     for child in model.modules():

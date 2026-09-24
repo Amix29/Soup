@@ -14,12 +14,14 @@ from soup_cli.utils.fast_lora import (
     _as_dtype,
     _dense_weight,
     _flatten,
+    _is_supported_lora_projection,
     _projection_state,
 )
 
 logger = logging.getLogger(__name__)
 _PATCH_MARKER = "_soup_fast_lora_mlp"
 _ORIGINAL_FORWARD_MARKER = "_soup_fast_lora_mlp_original_forward"
+_HAD_INSTANCE_FORWARD_MARKER = "_soup_fast_lora_mlp_had_instance_forward"
 _FUNCTION: Any = None
 
 __all__ = ["patch_fast_lora_mlp", "unpatch_fast_lora_mlp"]
@@ -131,12 +133,14 @@ def _mlp_function() -> Any:
             grad_u = grad_m * silu_g
             grad_g = grad_m * u * sig * (1 + g * (1 - sig))
 
-            dense_g = _dense_weight(wg, qg_meta, qg, grad_g.dtype)
-            grad_x = torch.matmul(grad_g, dense_g)
-            del dense_g
-            dense_u = _dense_weight(wu, qu_meta, qu, grad_u.dtype)
-            grad_x = torch.add(grad_x, torch.matmul(grad_u, dense_u))
-            del dense_u
+            grad_x = None
+            if ctx.needs_input_grad[0]:
+                dense_g = _dense_weight(wg, qg_meta, qg, grad_g.dtype)
+                grad_x = torch.matmul(grad_g, dense_g)
+                del dense_g
+                dense_u = _dense_weight(wu, qu_meta, qu, grad_u.dtype)
+                grad_x = torch.add(grad_x, torch.matmul(grad_u, dense_u))
+                del dense_u
 
             grad_ag = grad_bgl = grad_au = grad_bul = None
             dh_parts = []
@@ -164,10 +168,14 @@ def _mlp_function() -> Any:
                 dh_gu = dh_parts[0] if len(dh_parts) == 1 else torch.cat(dh_parts, dim=-1)
                 a_gu = a_parts[0] if len(a_parts) == 1 else torch.cat(a_parts, dim=0)
                 grad_a_gu = _flatten(dh_gu).t() @ _as_dtype(_flatten(x), dh_gu.dtype)
-                grad_x = torch.add(
-                    grad_x,
-                    torch.matmul(_as_dtype(dh_gu, grad_x.dtype), _as_dtype(a_gu, grad_x.dtype)),
-                )
+                if grad_x is not None:
+                    grad_x = torch.add(
+                        grad_x,
+                        torch.matmul(
+                            _as_dtype(dh_gu, grad_x.dtype),
+                            _as_dtype(a_gu, grad_x.dtype),
+                        ),
+                    )
                 cursor = 0
                 if has_g:
                     rank = ctx.gu_ranks[0]
@@ -224,7 +232,7 @@ def _make_mlp_forward(original_forward: Any) -> Any:
             gate.qmeta, up.qmeta, down.qmeta,
             *qparts,
         )
-        return out if out.dtype == input_dtype else out.to(input_dtype)
+        return out if work_x is x else out.to(input_dtype)
 
     return _forward
 
@@ -232,7 +240,7 @@ def _make_mlp_forward(original_forward: Any) -> Any:
 def _module_uses_silu(module: Any) -> bool:
     act_fn = getattr(module, "act_fn", None)
     if act_fn is None:
-        return True
+        return False
     name = (getattr(act_fn, "__name__", "") or type(act_fn).__name__).lower()
     return "silu" in name or "swish" in name
 
@@ -274,7 +282,18 @@ def patch_fast_lora_mlp(model: Any) -> int:
             for name in ("gate_proj", "up_proj", "down_proj")
         ):
             continue
+        projections = [
+            getattr(module, name) for name in ("gate_proj", "up_proj", "down_proj")
+        ]
+        if any(hasattr(proj, "modules_to_save") for proj in projections):
+            continue
+        if any(
+            hasattr(proj, "lora_A") and not _is_supported_lora_projection(proj)
+            for proj in projections
+        ):
+            continue
         setattr(module, _ORIGINAL_FORWARD_MARKER, module.forward)
+        setattr(module, _HAD_INSTANCE_FORWARD_MARKER, "forward" in vars(module))
         setattr(module, _PATCH_MARKER, True)
         module.forward = types.MethodType(_make_mlp_forward(module.forward), module)
         patched += 1
@@ -288,8 +307,12 @@ def unpatch_fast_lora_mlp(model: Any) -> int:
         original = getattr(module, _ORIGINAL_FORWARD_MARKER, None)
         if original is None or not getattr(module, _PATCH_MARKER, False):
             continue
-        module.forward = original
+        if getattr(module, _HAD_INSTANCE_FORWARD_MARKER, False):
+            module.forward = original
+        else:
+            del module.forward
         delattr(module, _ORIGINAL_FORWARD_MARKER)
+        delattr(module, _HAD_INSTANCE_FORWARD_MARKER)
         delattr(module, _PATCH_MARKER)
         restored += 1
     return restored
