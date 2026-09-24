@@ -1,7 +1,7 @@
 """v0.71.2 — "Governance & supply-chain live" (no GPU).
 
 v0.71.2 closed #186/#187/#190/#191/#192 and shipped the ed25519 halves of
-#179/#185. The v0.75.0 follow-ups make the remaining Sigstore backends live.
+#179/#185. Follow-up work makes the remaining Sigstore backends live.
 
 Test organisation (one class per concern):
 - TestSigningPrimitives        — utils/signing.py ed25519 helpers (#179/#185 core)

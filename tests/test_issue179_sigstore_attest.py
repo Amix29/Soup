@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -27,6 +28,22 @@ def _patch_signer(monkeypatch, bundle='{"bundle":"ok"}'):
 
     monkeypatch.setattr(sigstore_signing, "sign_payload_sigstore", sign)
     return seen
+
+
+def _emit_args(output):
+    return [
+        "emit",
+        "--stage",
+        "train",
+        "--subject",
+        "adapter",
+        "--sha",
+        "a" * 64,
+        "--sign",
+        "sigstore",
+        "--output",
+        str(output),
+    ]
 
 
 class TestAttestationSigstoreBackend:
@@ -74,22 +91,6 @@ class TestAttestationSigstoreBackend:
 
 
 class TestAttestSigstoreCli:
-    def _emit_args(self, output):
-        return [
-            "emit",
-            "--stage",
-            "train",
-
-            "--subject",
-            "adapter",
-            "--sha",
-            "a" * 64,
-            "--sign",
-            "sigstore",
-            "--output",
-            str(output),
-        ]
-
     def test_emit_writes_bundle_sidecar(self, tmp_path, monkeypatch):
         from soup_cli.commands.attest import app
 
@@ -97,7 +98,7 @@ class TestAttestSigstoreCli:
         _patch_signer(monkeypatch)
         output = tmp_path / "attestation.json"
 
-        result = CliRunner().invoke(app, self._emit_args(output))
+        result = CliRunner().invoke(app, _emit_args(output))
         assert result.exit_code == 0, result.output
         assert output.exists()
         sidecar = json.loads(
@@ -124,7 +125,7 @@ class TestAttestSigstoreCli:
             ),
         )
         output = tmp_path / "attestation.json"
-        result = CliRunner().invoke(app, self._emit_args(output))
+        result = CliRunner().invoke(app, _emit_args(output))
 
         assert result.exit_code == 1
         assert "OIDC unavailable" in result.output
@@ -308,7 +309,7 @@ class TestAttestSigstoreReviewFollowups:
         monkeypatch.chdir(tmp_path)
         seen = _patch_signer(monkeypatch)
         output = tmp_path / "att.json"
-        args = TestAttestSigstoreCli()._emit_args(output) + ["--interactive-oidc"]
+        args = _emit_args(output) + ["--interactive-oidc"]
         result = CliRunner().invoke(app, args)
 
         assert result.exit_code == 0, result.output
@@ -376,7 +377,7 @@ class TestAttestSigstoreReviewFollowups:
         link.symlink_to(target)
 
         result = CliRunner().invoke(
-            attest_cmd.app, TestAttestSigstoreCli()._emit_args(output)
+            attest_cmd.app, _emit_args(output)
         )
         assert result.exit_code == 2, result.output
         assert called["sign"] is False
@@ -400,7 +401,7 @@ class TestAttestSigstoreReviewFollowups:
         directory.mkdir()
 
         result = CliRunner().invoke(
-            attest_cmd.app, TestAttestSigstoreCli()._emit_args(output)
+            attest_cmd.app, _emit_args(output)
         )
         assert result.exit_code == 2, result.output
         assert called["sign"] is False
@@ -416,7 +417,7 @@ class TestAttestSigstoreReviewFollowups:
             lambda payload, *, interactive=False: "",
         )
         output = tmp_path / "att.json"
-        result = CliRunner().invoke(app, TestAttestSigstoreCli()._emit_args(output))
+        result = CliRunner().invoke(app, _emit_args(output))
 
         assert result.exit_code == 1, result.output
         assert "empty bundle" in result.output
@@ -599,3 +600,78 @@ class TestAttestSigstoreReviewFollowups:
         )
         assert result.exit_code == 2, result.output
         assert "--interactive-oidc requires --sign sigstore" in result.output
+
+
+def test_verifier_production_failure_is_unavailable_not_invalid(tmp_path, monkeypatch):
+    import sys
+    from types import ModuleType
+
+    import soup_cli.commands.attest as attest_cmd
+
+    monkeypatch.chdir(tmp_path)
+    statement, sidecar = TestAttestSigstoreCli()._write_verify_pair(tmp_path)
+    models = ModuleType("sigstore.models")
+    verify_mod = ModuleType("sigstore.verify")
+    policy_mod = ModuleType("sigstore.verify.policy")
+
+    class Bundle:
+        @classmethod
+        def from_json(cls, _text):
+            return cls()
+
+    class Identity:
+        def __init__(self, *, identity, issuer):
+            self.identity = identity
+            self.issuer = issuer
+
+    class Verifier:
+        @classmethod
+        def production(cls):
+            raise RuntimeError("TUF metadata unavailable")
+
+    models.Bundle = Bundle
+    verify_mod.Verifier = Verifier
+    policy_mod.Identity = Identity
+    monkeypatch.setitem(sys.modules, "sigstore.models", models)
+    monkeypatch.setitem(sys.modules, "sigstore.verify", verify_mod)
+    monkeypatch.setitem(sys.modules, "sigstore.verify.policy", policy_mod)
+
+    result = CliRunner().invoke(
+        attest_cmd.app,
+        [
+            "verify", str(statement), "--signature", str(sidecar),
+            "--cert-identity", "trusted@example.com",
+            "--cert-oidc-issuer", "https://issuer.example",
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    out = _strip_ansi(result.output)
+    flattened = " ".join(out.split())
+    assert "verification unavailable" in flattened.lower()
+    assert "TUF metadata unavailable" in flattened
+
+
+def test_emit_write_oserror_is_usage_failure(tmp_path, monkeypatch):
+    import soup_cli.commands.attest as attest_cmd
+
+    monkeypatch.chdir(tmp_path)
+    _patch_signer(monkeypatch)
+    output = tmp_path / "att.json"
+
+    def fail_write(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(attest_cmd, "write_attestation", fail_write)
+    result = CliRunner().invoke(attest_cmd.app, _emit_args(output))
+    assert result.exit_code == 2, result.output
+    cleaned = _strip_ansi(result.output)
+    assert "Write failed" in cleaned
+    assert "disk full" in cleaned
+
+
+def test_attest_docs_document_unavailable_exit():
+    docs_path = (
+        Path(__file__).resolve().parents[1] / "docs" / "adapters-and-governance.md"
+    )
+    docs = docs_path.read_text(encoding="utf-8")
+    assert "exits 1 when Sigstore" in docs

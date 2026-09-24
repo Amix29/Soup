@@ -438,9 +438,11 @@ proof). `verify` re-canonicalises the statement JSON and requires both the
 Sigstore certificate identity and OIDC issuer out of band; either value without
 the other is refused. Sigstore emission requires `--output` so the public Rekor
 entry can never outlive a discarded local bundle; browser OIDC is explicit opt-in.
-Verification exits 3 on tamper or policy mismatch. An explicit Sigstore signing
-request fails closed if OIDC/Fulcio/Rekor is unavailable; it is never silently
-downgraded to unsigned. A valid signature proves the signer
+Verification exits 3 on tamper or policy mismatch, and exits 1 when Sigstore
+verification itself is unavailable (for example TUF/network failure) so an
+operational outage is not reported as tampering. Usage/input errors exit 2.
+An explicit Sigstore signing request fails closed if OIDC/Fulcio/Rekor is
+unavailable; it is never silently downgraded to unsigned. A valid signature proves the signer
 *asserted* the statement; it does not re-verify the subject digest against an
 artifact.
 

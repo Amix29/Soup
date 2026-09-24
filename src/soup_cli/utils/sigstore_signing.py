@@ -84,7 +84,15 @@ def verify_payload_sigstore(
     try:
         bundle = Bundle.from_json(bundle_json)
         policy = Identity(identity=identity, issuer=issuer)
+    except Exception as exc:
+        raise ValueError(f"Sigstore verification failed: {exc}") from exc
+
+    try:
         verifier = Verifier.production()
+    except Exception as exc:
+        raise RuntimeError(f"Sigstore verifier unavailable: {exc}") from exc
+
+    try:
         verifier.verify_artifact(payload, bundle, policy)
     except Exception as exc:
         raise ValueError(f"Sigstore verification failed: {exc}") from exc

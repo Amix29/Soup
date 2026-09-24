@@ -246,7 +246,8 @@ def verify_cmd(
 ) -> None:
     """Verify an ed25519 or Sigstore-signed attestation.
 
-    Exit codes: 0 = signature valid; 3 = invalid / mismatch.
+    Exit codes: 0 = signature valid; 1 = verifier unavailable; 2 = usage/input
+    error; 3 = invalid signature / policy mismatch.
     """
     from soup_cli.utils.paths import enforce_under_cwd_and_no_symlink
 
