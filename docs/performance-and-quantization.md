@@ -730,7 +730,7 @@ does not make it free.
   host memory.)
 
 **Roadmap:**
-- A published 14B-on-8 GB reference benchmark — the **memory** half is done: a Qwen2.5-14B-shaped NF4 run at batch 1 x seq 384 trains end to end on an RTX 5070 Laptop 8 GB / 32 GB box with the store page-locked, measured peak 2.94 GB against a 3.39 GB prediction ([record](../benchmarks/gate-901-14b-on-8gb.md), #901). It is a synthetic *shape* with random weights, so no throughput or quality figure is quoted; a real Qwen2.5-14B-Instruct run on an 8 GB card is still wanted
+- A published 14B-on-8 GB reference benchmark — the **memory** half is done: a Qwen2.5-14B-shaped NF4 run at batch 1 x seq 384 trains end to end on an RTX 5070 Laptop 8 GB / 32 GB box with the store page-locked, measured peak 2.94 GB against a 3.39 GB prediction ([record](../benchmarks/gate-901-14b-on-8gb.md), #901). It is a synthetic *shape* with random weights, so no throughput or quality figure is quoted; a real Qwen2.5-14B-Instruct run on an RTX 3070 8 GB, reported by @hasheng on #901, pinned the 9.93 GB store (10.74 GB page-locked), measured a 2.92 GB peak against a 3.39 GB prediction, and trained 18 of 18 steps
 - GRPO and PPO are explicitly **not** planned: rollouts need generation, which re-reads the model per token
 
 **Disk pre-flight and shard cache.** Before Soup materialises or shards a checkpoint, it
