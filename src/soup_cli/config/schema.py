@@ -1737,10 +1737,10 @@ class TrainingConfig(BaseModel):
     ]] = Field(
         default=None,
         description=(
-            "TTS model family — required when task='tts'. Recognized values: "
-            "orpheus, llasa, spark, oute, and sesame_csm. sesame_csm is "
-            "recognized only to produce an explicit refusal until Soup has a "
-            "native CSM multimodal trainer."
+            "TTS model family — required when task='tts'. Runnable choices are "
+            "orpheus, llasa, spark, and oute. sesame_csm is retained only so "
+            "legacy configs receive an explicit refusal until Soup has a native "
+            "CSM multimodal trainer."
         ),
     )
     tts_emotion: Optional[str] = Field(
@@ -5092,8 +5092,8 @@ class SoupConfig(BaseModel):
                 raise ValueError(str(exc)) from exc
             if tcfg.tts_family is None:
                 raise ValueError(
-                    "task='tts' requires training.tts_family in "
-                    "(orpheus, sesame_csm, llasa, spark, oute)"
+                    "task='tts' requires a runnable training.tts_family in "
+                    "(orpheus, llasa, spark, oute); sesame_csm is currently refused"
                 )
             if tcfg.tts_family == "sesame_csm":
                 raise ValueError(

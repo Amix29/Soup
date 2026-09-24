@@ -142,21 +142,24 @@ class TestDispatch:
         tts_codec._get_xcodec2_components(device="cpu")
         assert events == ["extractor", "model"]
 
-    def test_llasa_gate_names_audio_extra_when_torchaudio_is_missing(self, monkeypatch):
-        import importlib.util
+    @pytest.mark.parametrize("error", [ImportError("missing"), OSError("libcudart mismatch")])
+    def test_llasa_gate_names_audio_extra_when_torchaudio_cannot_load(
+        self, monkeypatch, error
+    ):
+        import builtins
 
         from soup_cli.trainer.tts import TTSTrainerWrapper
 
-        real_find_spec = importlib.util.find_spec
+        real_import = builtins.__import__
 
-        def fake_find_spec(name, *args, **kwargs):
+        def fake_import(name, *args, **kwargs):
             if name == "torchaudio":
-                return None
-            return real_find_spec(name, *args, **kwargs)
+                raise error
+            return real_import(name, *args, **kwargs)
 
-        monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+        monkeypatch.setattr(builtins, "__import__", fake_import)
         wrapper = object.__new__(TTSTrainerWrapper)
-        with pytest.raises(RuntimeError, match="soup-cli.*audio"):
+        with pytest.raises(RuntimeError, match=r"soup-cli\[audio\].*torch"):
             wrapper._require_tts_codec("llasa")
 
     def test_injected_model_and_extractor_must_arrive_together(self, tmp_path):

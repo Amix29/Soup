@@ -293,7 +293,7 @@ jobs:
           )
           expected = dict(pairs)
           assert len(expected) == len(pairs), "duplicate package pin in floor constraints"
-          for name in ("torch", "transformers", "trl", "peft", "plotext"):
+          for name in ("torch", "torchaudio", "transformers", "trl", "peft", "plotext"):
               assert name in expected, f"floor constraints missing exact {name} pin"
               want = expected[name]
               got = md.version(name)

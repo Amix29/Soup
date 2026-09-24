@@ -113,12 +113,16 @@ class TTSTrainerWrapper(SFTTrainerWrapper):
 
             raise csm_live_codec_error()
         if family == "llasa":
-            if importlib.util.find_spec("torchaudio") is None:
+            try:
+                __import__("torchaudio")
+            except (ImportError, OSError) as exc:
                 raise RuntimeError(
-                    "Llasa live-codec needs torchaudio for the Transformers-native "
-                    "XCodec2 feature extractor. Install the audio extra with "
-                    "pip install \"soup-cli[audio]\"."
-                )
+                    "Llasa live-codec needs a torchaudio build that matches the "
+                    "installed torch release for the Transformers-native XCodec2 "
+                    "feature extractor. Install the audio extra with "
+                    "pip install \"soup-cli[audio]\", and pin matching torch/"
+                    "torchaudio versions if your resolver does not."
+                ) from exc
             try:
                 from transformers import Xcodec2Model  # noqa: F401
             except ImportError as exc:
