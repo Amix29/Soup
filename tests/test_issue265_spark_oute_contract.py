@@ -83,3 +83,28 @@ def test_incompatibility_helper_always_returns_runtime_error():
     from soup_cli.utils.tts_codec import incompatible_live_codec_error
 
     assert isinstance(incompatible_live_codec_error("orpheus"), RuntimeError)
+
+
+def test_tts_docs_list_only_runnable_codec_string_recipes():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    text = (root / "docs" / "training.md").read_text(encoding="utf-8")
+    start = text.index("## TTS")
+    end = text.index("## Classifier", start)
+    section = text[start:end]
+
+    assert "Three ready-made codec-string recipes ship" in section
+    assert "spark-tts" not in section
+    for recipe in ("orpheus-tts-sft", "llasa-tts", "oute-tts"):
+        assert recipe in section
+
+
+def test_command_reference_keeps_emotion_templating():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    lines = (root / "docs" / "commands.md").read_text(encoding="utf-8").splitlines()
+    row = next(line for line in lines if "task='tts'" in line)
+    assert "emotion templating" in row
+    assert "LIVE (v0.71.20)" in row
