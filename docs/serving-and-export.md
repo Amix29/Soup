@@ -636,6 +636,16 @@ soup ui
 # -> prints auth token to console
 ```
 
+> **v0.75.0 and v0.75.1: add the token to the URL yourself.** In these two
+> releases the tab `soup ui` opens carries no token, so it shows
+> `Error loading dashboard: Unauthorized` and no page can load data (#1194).
+> Open `http://127.0.0.1:<PORT>/?token=<TOKEN>` instead, with the port from
+> the startup panel's `URL:` line and the value on its `Token:` line. The page
+> keeps the token for that tab, so a reload works, and removes it from the
+> address bar; your browser's history still records the URL. A new tab or
+> another browser needs the URL again, and the token changes every time
+> `soup ui` starts unless you pass `--auth-token`.
+
 **Pages:**
 - **Dashboard** — view all experiment runs, loss charts, system info, multi-run comparison
 - **New Training** — create configs from templates or 174 ready-made recipes, validate, start training with live SSE log streaming and progress bar
