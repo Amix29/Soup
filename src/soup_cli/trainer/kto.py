@@ -359,6 +359,7 @@ class KTOTrainerWrapper(StreamingSetupMixin):
         resume_from_checkpoint: Optional[str] = None,
     ) -> dict:
         """Run KTO training and return results summary."""
+        self._assert_no_pending_stream_vram_probe()
         if self.trainer is None:
             raise RuntimeError(
                 "KTOTrainerWrapper.train() called before setup(). "

@@ -399,6 +399,27 @@ _REFERENCE_USING = ("dpo", "kto")
 _ALL_PREFERENCE = ("dpo", "orpo", "simpo", "kto")
 
 
+def test_real_setup_then_train_refuses_an_unconsumed_preference_probe(
+    tmp_path, monkeypatch
+):
+    from soup_cli.trainer.stream_setup import _ProbePlan
+
+    wrapper, _, _ = _build_streamed_wrapper(
+        tmp_path, monkeypatch, task="dpo", device="cpu"
+    )
+    wrapper._pending_stream_vram_probe = _ProbePlan(
+        task="dpo",
+        batch_size=1,
+        rows=2,
+        seq_len=64,
+        vocab_size=64,
+        predicted_bytes=100,
+        available_bytes=1_000,
+    )
+    with pytest.raises(RuntimeError, match="probe was not consumed"):
+        wrapper.train()
+
+
 class TestStreamingTaskGate:
     """v0.72.0-.3 hard-coded ``task == 'sft'``. v0.72.4 opens exactly four more
     and keeps refusing the rest — GRPO/PPO *permanently*, because rollouts

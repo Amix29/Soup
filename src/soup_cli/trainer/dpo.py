@@ -397,6 +397,7 @@ class DPOTrainerWrapper(StreamingSetupMixin):
         resume_from_checkpoint: Optional[str] = None,
     ) -> dict:
         """Run DPO training and return results summary."""
+        self._assert_no_pending_stream_vram_probe()
         start = time.time()
 
         # Add callback for live display and experiment tracking

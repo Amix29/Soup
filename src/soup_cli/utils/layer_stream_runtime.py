@@ -1921,6 +1921,10 @@ def measure_loss_step_peak_bytes(
             loss = loss[0]
         if not hasattr(loss, "backward"):
             raise TypeError("preference VRAM probe compute_loss returned no differentiable loss")
+        if not bool(torch.isfinite(loss.detach()).all().item()):
+            raise FloatingPointError(
+                "preference VRAM probe compute_loss returned a non-finite loss"
+            )
         loss.mean().backward()
         torch.cuda.synchronize()
         elapsed = time.perf_counter() - started

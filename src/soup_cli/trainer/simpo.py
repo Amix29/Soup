@@ -365,6 +365,7 @@ class SimPOTrainerWrapper(StreamingSetupMixin):
         resume_from_checkpoint: Optional[str] = None,
     ) -> dict:
         """Run SimPO training and return results summary."""
+        self._assert_no_pending_stream_vram_probe()
         if self.trainer is None:
             raise RuntimeError(
                 "SimPOTrainerWrapper.train() called before setup(). "

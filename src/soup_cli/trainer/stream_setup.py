@@ -20,9 +20,13 @@ NO top-level torch: this module is imported by five trainer modules.
 """
 
 import contextlib
+import copy
 import math
 import os
+import random
 import shutil
+import sys
+import types
 from dataclasses import dataclass
 
 from rich.console import Console
@@ -304,7 +308,12 @@ def _resize_probe_tensor(value, *, length: int, fill_from_last: bool):
     if current == length:
         return value
     if current > length:
-        return value[:, :length]
+        raise ValueError(
+            "preference VRAM probe received a sequence of length "
+            f"{current}, above the configured data.max_length={length}; refusing "
+            "to truncate a real trainer batch because that would under-measure "
+            "the training step"
+        )
     if current == 0:
         raise ValueError("cannot extend an empty preference-probe token sequence")
     pad = length - current
@@ -360,6 +369,85 @@ def _stretch_preference_probe_batch(batch: dict, *, seq_len: int) -> dict:
             "preference VRAM probe found no complete token sequence in the TRL batch"
         )
     return out
+
+
+def _preference_probe_rows(batch: dict) -> int:
+    """Return the model-row count represented by one prepared TRL batch."""
+    if (ids := batch.get("input_ids")) is not None and getattr(ids, "ndim", 0) == 2:
+        return int(ids.shape[0])
+    pair = [batch.get("chosen_input_ids"), batch.get("rejected_input_ids")]
+    if all(value is not None and getattr(value, "ndim", 0) == 2 for value in pair):
+        return sum(int(value.shape[0]) for value in pair)
+    ids = batch.get("completion_input_ids")
+    if ids is not None and getattr(ids, "ndim", 0) == 2:
+        return int(ids.shape[0])
+    raise ValueError("preference VRAM probe could not determine the TRL batch row count")
+
+
+@contextlib.contextmanager
+def _trainer_forward_for_probe(trainer, model):
+    """Temporarily install the AMP forward that Accelerate prepares for training."""
+    accelerator = getattr(trainer, "accelerator", None)
+    if accelerator is None or not getattr(accelerator, "native_amp", False):
+        yield
+        return
+
+    from accelerate.utils.modeling import get_mixed_precision_context_manager
+    from accelerate.utils.operations import convert_outputs_to_fp32
+
+    had_instance_forward = "forward" in vars(model)
+    instance_forward = vars(model).get("forward")
+    original_forward = model.forward
+    autocast_context = get_mixed_precision_context_manager(
+        accelerator.native_amp, accelerator.autocast_handler
+    )
+    if hasattr(original_forward, "__func__"):
+        new_forward = autocast_context(original_forward.__func__)
+        model.forward = types.MethodType(new_forward, model)
+        model.forward = types.MethodType(
+            convert_outputs_to_fp32(model.forward.__func__), model
+        )
+    else:
+        model.forward = convert_outputs_to_fp32(autocast_context(original_forward))
+    try:
+        yield
+    finally:
+        if had_instance_forward:
+            model.forward = instance_forward
+        elif "forward" in vars(model):
+            delattr(model, "forward")
+
+
+@contextlib.contextmanager
+def _preserve_preference_probe_state(trainer):
+    """Keep a pre-flight loss call out of training metrics and random streams."""
+    import torch
+
+    missing = object()
+    mutable = ("_metrics", "_stored_metrics", "_total_train_tokens")
+    snapshots = {
+        name: copy.deepcopy(getattr(trainer, name, missing)) for name in mutable
+    }
+    python_rng = random.getstate()
+    torch_rng = torch.random.get_rng_state()
+    cuda_rng = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    numpy = sys.modules.get("numpy")
+    numpy_rng = None if numpy is None else numpy.random.get_state()
+    try:
+        yield
+    finally:
+        for name, value in snapshots.items():
+            if value is missing:
+                if hasattr(trainer, name):
+                    delattr(trainer, name)
+            else:
+                setattr(trainer, name, value)
+        random.setstate(python_rng)
+        torch.random.set_rng_state(torch_rng)
+        if cuda_rng is not None:
+            torch.cuda.set_rng_state_all(cuda_rng)
+        if numpy_rng is not None:
+            numpy.random.set_state(numpy_rng)
 
 
 def _existing_disk_anchor(path: str) -> str:
@@ -1368,34 +1456,57 @@ class StreamingSetupMixin:
             return
         self._pending_stream_vram_probe = None
         try:
-            batch = next(iter(self.trainer.get_train_dataloader()))
-            batch = _stretch_preference_probe_batch(batch, seq_len=plan.seq_len)
-            model_device = next(
-                param.device for param in self.model.parameters() if not param.is_meta
-            )
-            batch = {
-                key: (value.to(model_device) if hasattr(value, "to") else value)
-                for key, value in batch.items()
-            }
-        except Exception:
-            self._close_stream_runtime()
-            raise
+            with _preserve_preference_probe_state(self.trainer):
+                batch = next(iter(self.trainer.get_train_dataloader()))
+                batch = _stretch_preference_probe_batch(batch, seq_len=plan.seq_len)
+                measured_rows = _preference_probe_rows(batch)
+                if measured_rows != plan.rows:
+                    raise ValueError(
+                        "preference VRAM probe expected "
+                        f"{plan.rows} model rows but the real TRL batch produced "
+                        f"{measured_rows}; refusing to under-measure a partial batch"
+                    )
+                model_device = next(
+                    param.device for param in self.model.parameters() if not param.is_meta
+                )
+                batch = {
+                    key: (value.to(model_device) if hasattr(value, "to") else value)
+                    for key, value in batch.items()
+                }
 
-        from soup_cli.utils.layer_stream_runtime import measure_loss_step_peak_bytes
+                from soup_cli.utils.layer_stream_runtime import (
+                    measure_loss_step_peak_bytes,
+                )
 
-        self.model.train()
-        try:
-            peak = measure_loss_step_peak_bytes(
-                self.model,
-                step=lambda: self.trainer.compute_loss(self.model, batch),
-                rows=plan.rows,
-                seq_len=plan.seq_len,
-                device=str(self.device),
-            )
+                was_training = self.model.training
+                self.model.train()
+                try:
+                    with _trainer_forward_for_probe(self.trainer, self.model):
+                        peak = measure_loss_step_peak_bytes(
+                            self.model,
+                            step=lambda: self.trainer.compute_loss(self.model, batch),
+                            rows=plan.rows,
+                            seq_len=plan.seq_len,
+                            device=str(self.device),
+                        )
+                finally:
+                    self.model.train(was_training)
         except Exception:
             self._close_stream_runtime()
             raise
         self._finish_stream_vram_probe(peak, plan)
+
+    def _assert_no_pending_stream_vram_probe(self) -> None:
+        """Fail closed if setup did not consume a deferred preference probe."""
+        plan = getattr(self, "_pending_stream_vram_probe", None)
+        if plan is None:
+            return
+        self._close_stream_runtime()
+        raise RuntimeError(
+            "training.stream_vram_probe was requested, but the deferred "
+            f"{plan.task} probe was not consumed during setup; refusing to start "
+            "training without the measured VRAM gate"
+        )
 
     def _finish_stream_vram_probe(self, peak, plan: _ProbePlan) -> None:
         """Apply the one measured-fit policy shared by SFT and preferences."""
