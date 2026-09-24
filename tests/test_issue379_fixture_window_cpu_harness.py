@@ -39,6 +39,7 @@ def _row(
     training_diff=0.0,
     variant2_abs=100.0,
     inference_rel=None,
+    emulated_bf16_rel=0.004,
 ):
     if inference_rel is None:
         inference_rel = inference_diff / variant2_abs if variant2_abs else float("inf")
@@ -49,6 +50,8 @@ def _row(
         inference_packed_for_cpu=inference_packed,
         training_packed_for_cpu=training_packed,
         variant2_max_abs=variant2_abs,
+        emulated_bf16_vs_variant2_max_abs=emulated_bf16_rel * variant2_abs,
+        emulated_bf16_rel=emulated_bf16_rel,
         inference_vs_variant2_max_abs=inference_diff,
         inference_vs_variant2_rel=inference_rel,
         training_vs_variant2_max_abs=training_diff,
@@ -95,6 +98,8 @@ def test_real_row_uses_shipped_variant2_and_exact_training_control(monkeypatch):
     assert calls["n"] == 1
     assert row.training_packed_for_cpu is False
     assert row.training_vs_variant2_max_abs == 0.0
+    assert row.variant2_max_abs > 0.0
+    assert 0.0 <= row.emulated_bf16_rel < harness.PACKED_EFFECT_REL_ENVELOPE
 
 
 def test_nf4_fixture_uses_double_quant():
@@ -110,7 +115,7 @@ def test_nf4_fixture_uses_double_quant():
 
 
 def test_measure_row_requires_eval_inference_and_reports_packing(monkeypatch):
-    pytest.importorskip("torch")
+    torch = pytest.importorskip("torch")
     pytest.importorskip("bitsandbytes")
 
     harness = _load_harness()
@@ -148,13 +153,22 @@ def test_measure_row_requires_eval_inference_and_reports_packing(monkeypatch):
 
     monkeypatch.setattr(harness, "_quantized_linear", lambda *a, **k: FakeLayer())
     monkeypatch.setattr(runtime, "install_dequant_forward", lambda _module: 1)
+    monkeypatch.setattr(harness, "_emulated_bf16_reference", lambda _layer, x: x)
 
     row = harness.measure_row(4, 4, 2, seed=5)
+
+    generator = torch.Generator().manual_seed(harness._row_seed(5, 4, 4, 2))
+    torch.randn((4, 4), generator=generator, dtype=torch.float32)
+    x = torch.randn((2, 4), generator=generator, dtype=torch.float32)
+    expected_max = float(x.abs().max())
+
     assert "eval" in events
     assert row.inference_packed_for_cpu is True
     assert row.training_packed_for_cpu is False
     assert row.training_vs_variant2_max_abs == 0.0
+    assert row.variant2_max_abs == pytest.approx(expected_max)
     assert row.inference_vs_variant2_max_abs == 1.0
+    assert row.inference_vs_variant2_rel == pytest.approx(1.0 / expected_max)
 
 
 def test_run_probe_counts_inference_packed_not_training_packed(monkeypatch):
@@ -307,11 +321,13 @@ def test_script_documents_avx512_and_kernels_attribution_boundary():
     source = HARNESS.read_text(encoding="utf-8")
     assert "AVX512-BF16 is required" in source
     assert "kernels-community/quantization-bitsandbytes" in source
-    assert "does NOT identify which lower-level kernel executed" in source
+    assert "best-effort lower-level kernel attribution" in source
+
+
 def test_control_is_checked_on_every_row_before_capability():
     harness = _load_harness()
     rows = [
-        _row(harness, inference_packed=True, inference_diff=1.0),
+        _row(harness),
         _row(harness, training_diff=0.125),
     ]
     verdict = harness._evaluate_rows(rows)
@@ -378,3 +394,181 @@ def test_harness_source_has_no_model_or_dataset_download_calls():
     forbidden = ("from_pretrained(", "load_dataset(", "hf_hub_download(", "requests.")
     assert not any(token in source for token in forbidden)
 
+
+
+@pytest.mark.parametrize(
+    ("scale", "expected_code"),
+    [
+        (3.0, 5),
+        (1.001, 0),
+    ],
+)
+def test_real_measurement_drives_relative_envelope(
+    monkeypatch, scale, expected_code
+):
+    pytest.importorskip("torch")
+    pytest.importorskip("bitsandbytes")
+    harness = _load_harness()
+    import soup_cli.utils.layer_stream_runtime as runtime
+
+    class QuantState:
+        packing_format_for_cpu = False
+
+    class Weight:
+        def __init__(self):
+            self.quant_state = QuantState()
+
+    class FakeLayer:
+        def __init__(self):
+            self.training = True
+            self.weight = Weight()
+
+        def train(self):
+            self.training = True
+            return self
+
+        def eval(self):
+            self.training = False
+            return self
+
+        def __call__(self, x):
+            if not self.training and not x.requires_grad:
+                self.weight.quant_state.packing_format_for_cpu = True
+                return x * scale
+            return x
+
+    monkeypatch.setattr(harness, "_quantized_linear", lambda *a, **k: FakeLayer())
+    monkeypatch.setattr(runtime, "install_dequant_forward", lambda _module: 1)
+    monkeypatch.setattr(harness, "_emulated_bf16_reference", lambda _layer, x: x)
+
+    row = harness.measure_row(4, 4, 2, seed=11)
+    verdict = harness._evaluate_rows([row])
+    assert verdict["exit_code"] == expected_code
+    if expected_code == 0:
+        assert row.inference_vs_variant2_rel == pytest.approx(0.001, rel=1e-4)
+    else:
+        assert row.inference_vs_variant2_rel == pytest.approx(2.0)
+
+
+def test_envelope_boundary_is_pinned_exactly():
+    harness = _load_harness()
+    at_limit = _row(
+        harness,
+        inference_packed=True,
+        inference_diff=2.0,
+        variant2_abs=100.0,
+        inference_rel=harness.PACKED_EFFECT_REL_ENVELOPE,
+    )
+    over_limit = _row(
+        harness,
+        inference_packed=True,
+        inference_diff=2.0001,
+        variant2_abs=100.0,
+        inference_rel=harness.PACKED_EFFECT_REL_ENVELOPE + 1e-6,
+    )
+    assert harness._evaluate_rows([at_limit])["exit_code"] == harness.EXIT_OK
+    assert (
+        harness._evaluate_rows([over_limit])["exit_code"]
+        == harness.EXIT_EFFECT_OUT_OF_RANGE
+    )
+
+
+def test_run_probe_publishes_emulated_bf16_margin(monkeypatch):
+    pytest.importorskip("torch")
+    pytest.importorskip("bitsandbytes")
+    harness = _load_harness()
+    rows = iter(
+        [
+            _row(harness, emulated_bf16_rel=0.003),
+            _row(harness, emulated_bf16_rel=0.0048),
+        ]
+    )
+    monkeypatch.setattr(harness, "measure_row", lambda *a, **k: next(rows))
+
+    result = harness.run_probe(m_values=(8, 16), shapes=((64, 64),))
+    assert result["emulated_bf16_worst_rel"] == pytest.approx(0.0048)
+    assert result["packed_effect_rel_envelope"] == 0.02
+    assert result["envelope_over_emulated_worst"] == pytest.approx(
+        0.02 / 0.0048
+    )
+    assert (
+        result["packed_effect_rel_envelope"]
+        > result["emulated_bf16_worst_rel"]
+    )
+
+
+def test_row_seed_uses_full_tuple_and_breaks_old_collision():
+    harness = _load_harness()
+    # The old seed + out_features + m formula collides for these two rows.
+    assert 64 + 256 == 256 + 64
+    left = harness._row_seed(17, 64, 64, 256)
+    right = harness._row_seed(17, 256, 64, 64)
+    assert left != right
+
+
+def test_one_packed_training_row_fails_even_next_to_clean_row():
+    harness = _load_harness()
+    rows = [
+        _row(harness, training_packed=True),
+        _row(harness, training_packed=False),
+    ]
+    verdict = harness._evaluate_rows(rows)
+    assert verdict["exit_code"] == harness.EXIT_CONTROL_FAILED
+
+
+def test_cpu_kernel_attribution_states(monkeypatch):
+    pytest.importorskip("bitsandbytes")
+    import bitsandbytes.backends.cpu.ops as cpu_ops
+
+    harness = _load_harness()
+    monkeypatch.setattr(harness, "_cpu_gemv_registered", lambda: False)
+    monkeypatch.delattr(cpu_ops, "gemm_4bit_forward_kernel", raising=False)
+    assert harness._cpu_packed_kernel_attribution() == "not-registered"
+
+    monkeypatch.setattr(cpu_ops, "gemm_4bit_forward_kernel", None, raising=False)
+    assert (
+        harness._cpu_packed_kernel_attribution()
+        == "native-bitsandbytes-cpu-gemv"
+    )
+
+    monkeypatch.setattr(
+        cpu_ops,
+        "gemm_4bit_forward_kernel",
+        lambda *a, **k: None,
+        raising=False,
+    )
+    assert harness._cpu_packed_kernel_attribution() == "kernels-community"
+
+
+def test_run_probe_reports_kernel_attribution_fields(monkeypatch):
+    pytest.importorskip("torch")
+    pytest.importorskip("bitsandbytes")
+    harness = _load_harness()
+    monkeypatch.setattr(
+        harness,
+        "measure_row",
+        lambda *a, **k: _row(harness),
+    )
+    monkeypatch.setattr(
+        harness, "_cpu_packed_kernel_attribution", lambda: "not-registered"
+    )
+    monkeypatch.setattr(harness, "_cpu_gemv_registered", lambda: False)
+
+    result = harness.run_probe(m_values=(8,), shapes=((64, 64),))
+    assert result["cpu_packed_kernel"] == "not-registered"
+    assert result["cpu_gemv_4bit_registered"] is False
+
+
+def test_real_avx512_host_runs_default_gate_when_available(capsys):
+    functional = pytest.importorskip("bitsandbytes.functional")
+    if not functional.has_avx512bf16():
+        pytest.skip("requires an AVX512-BF16 host")
+
+    harness = _load_harness()
+    code = harness.main([])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    print(captured.out)
+    assert payload["has_avx512bf16"] is True
+    assert payload["packed_inference_rows"] > 0
+    assert code == harness.EXIT_OK

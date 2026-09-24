@@ -18,12 +18,12 @@ Requirements / attribution boundary
 - AVX512-BF16 is required for the mechanism this gate is intended to
   demonstrate. Without it, the default invocation FAILS; use ``--survey`` for a
   capability-only report.
-- On hosts where the optional ``kernels`` package is installed, bitsandbytes
-  0.50.x may fetch/use ``kernels-community/quantization-bitsandbytes`` on the
-  packed inference path. ``packing_format_for_cpu`` proves that the packed CPU
-  inference path ran; it does NOT identify which lower-level kernel executed.
-  This harness therefore makes no native-kernel attribution and no "no
-  downloads" promise.
+- Importing bitsandbytes on an AVX512-BF16 host may fetch/use
+  ``kernels-community/quantization-bitsandbytes``; that happens while the CPU
+  backend module is imported, before a row reaches the packed inference path.
+  ``packing_format_for_cpu`` proves that packing ran. The JSON separately
+  records best-effort lower-level kernel attribution and whether the CPU
+  ``gemv_4bit`` dispatch is registered. No "no downloads" promise is made.
 - The "variant 2" arm imports Soup's shipped ``install_dequant_forward``
   unmodified. NF4 uses ``compress_statistics=True`` (double quant), matching
   layer-stream shards.
@@ -33,9 +33,15 @@ Default invocation is a mechanism gate:
 2. at least one inference row must enter CPU packing;
 3. every packed inference row must differ from variant 2;
 4. every packed difference must remain rounding-scale: strictly greater than
-   zero and at most 2% of ``max(abs(variant2))``. The historical emulated bf16
-   path measured 0.31-0.41%, so 2% is a deliberately loose few-ulp envelope,
-   while the broken packed-layout simulation measured 129-188%.
+   zero and at most 2% of ``max(abs(variant2))``.
+
+Each row also computes an emulated bf16 reference from the same quantised
+weight: bf16-rounded input and dequantised weight, fp32 accumulation, then a
+bf16-rounded output. The JSON publishes its relative error and the ratio between
+the 2% envelope and the worst emulated row, so the envelope is justified by the
+same run. A previous review-time forced broken-packing simulation produced
+order-one errors, but that patched experiment is not an arm of this harness and
+is not used as acceptance evidence.
 
 Exit codes: 0 mechanism reproduced; 2 packing unavailable; 3 invalid training
 control; 4 packed effect absent on at least one row; 5 packed effect is too
@@ -63,9 +69,9 @@ EXIT_CONTROL_FAILED = 3
 EXIT_EFFECT_ABSENT = 4
 EXIT_EFFECT_OUT_OF_RANGE = 5
 
-# Correct bf16-path simulations in the historical record are ~0.3-0.4%.
-# Keep a deliberately loose few-ulp ceiling while rejecting the 129-188%
-# broken-layout effect measured on a host without the packed CPU kernel.
+# The default envelope is intentionally loose. Every run publishes a
+# per-row emulated-bf16 reference plus the multiple by which this ceiling
+# exceeds the worst emulated row, so the justification is reproducible.
 PACKED_EFFECT_REL_ENVELOPE = 0.02
 
 
@@ -77,6 +83,8 @@ class Row:
     inference_packed_for_cpu: bool
     training_packed_for_cpu: bool
     variant2_max_abs: float
+    emulated_bf16_vs_variant2_max_abs: float
+    emulated_bf16_rel: float
     inference_vs_variant2_max_abs: float
     inference_vs_variant2_rel: float
     training_vs_variant2_max_abs: float
@@ -114,13 +122,32 @@ def _quantized_linear(weight, *, compute_dtype):
     return layer
 
 
+def _row_seed(seed: int, out_features: int, in_features: int, m: int) -> int:
+    """Derive a deterministic stream from the complete fixture tuple."""
+    return seed + out_features * 1_000_003 + in_features * 1_009 + m
+
+
+def _emulated_bf16_reference(layer, x):
+    """Emulate the rounding-only bf16 path using this row's quantised weight."""
+    import bitsandbytes.functional as bnb_functional
+    import torch
+
+    dense_quantized = bnb_functional.dequantize_4bit(
+        layer.weight,
+        layer.weight.quant_state,
+    ).to(torch.float32)
+    return torch.nn.functional.linear(
+        x.to(torch.bfloat16).to(torch.float32),
+        dense_quantized.to(torch.bfloat16).to(torch.float32),
+    ).to(torch.bfloat16).to(torch.float32)
+
+
 def measure_row(out_features: int, in_features: int, m: int, *, seed: int = 17) -> Row:
     import torch
 
     from soup_cli.utils.layer_stream_runtime import install_dequant_forward
 
-    # Include the full tuple so different fixture/shape rows do not share a stream.
-    row_seed = seed + out_features * 1_000_003 + in_features * 1_009 + m
+    row_seed = _row_seed(seed, out_features, in_features, m)
     generator = torch.Generator().manual_seed(row_seed)
     weight = torch.randn(
         (out_features, in_features),
@@ -142,6 +169,8 @@ def measure_row(out_features: int, in_features: int, m: int, *, seed: int = 17) 
     variant2_layer.train()
     variant2_x = x.clone().requires_grad_(True)
     variant2 = variant2_layer(variant2_x).detach()
+
+    emulated_bf16 = _emulated_bf16_reference(variant2_layer, x)
 
     training_layer = _quantized_linear(weight, compute_dtype=torch.float32)
     training_layer.train()
@@ -168,13 +197,19 @@ def measure_row(out_features: int, in_features: int, m: int, *, seed: int = 17) 
     )
 
     inference_diff = float((inference - variant2).abs().max())
+    emulated_bf16_diff = float((emulated_bf16 - variant2).abs().max())
     variant2_max = float(variant2.abs().max())
     if variant2_max > 0.0:
         inference_rel = inference_diff / variant2_max
+        emulated_bf16_rel = emulated_bf16_diff / variant2_max
     elif inference_diff == 0.0:
         inference_rel = 0.0
+        emulated_bf16_rel = 0.0 if emulated_bf16_diff == 0.0 else float("inf")
     else:
         inference_rel = float("inf")
+        emulated_bf16_rel = (
+            0.0 if emulated_bf16_diff == 0.0 else float("inf")
+        )
 
     return Row(
         out_features=out_features,
@@ -183,6 +218,8 @@ def measure_row(out_features: int, in_features: int, m: int, *, seed: int = 17) 
         inference_packed_for_cpu=inference_packed,
         training_packed_for_cpu=training_packed,
         variant2_max_abs=variant2_max,
+        emulated_bf16_vs_variant2_max_abs=emulated_bf16_diff,
+        emulated_bf16_rel=emulated_bf16_rel,
         inference_vs_variant2_max_abs=inference_diff,
         inference_vs_variant2_rel=inference_rel,
         training_vs_variant2_max_abs=float(
@@ -260,6 +297,9 @@ def _evaluate_rows(rows: list[Row]) -> dict:
         ),
     }
 
+_MISSING_KERNEL_MARKER = object()
+
+
 def _cpu_packed_kernel_attribution() -> str:
     """Best-effort bnb 0.50.x attribution without making it a gate."""
     try:
@@ -267,8 +307,15 @@ def _cpu_packed_kernel_attribution() -> str:
     except Exception:
         return "unknown"
 
-    marker = getattr(cpu_ops, "gemm_4bit_forward_kernel", "__missing__")
-    if marker == "__missing__":
+    marker = getattr(
+        cpu_ops,
+        "gemm_4bit_forward_kernel",
+        _MISSING_KERNEL_MARKER,
+    )
+    if marker is _MISSING_KERNEL_MARKER:
+        registered = _cpu_gemv_registered()
+        if registered is False:
+            return "not-registered"
         return "unknown"
     if marker is None:
         return "native-bitsandbytes-cpu-gemv"
@@ -299,6 +346,12 @@ def run_probe(*, m_values=M_VALUES, shapes=FIXTURE_SHAPES) -> dict:
         for m in m_values
     ]
     verdict = _evaluate_rows(rows)
+    emulated_worst = max((row.emulated_bf16_rel for row in rows), default=0.0)
+    envelope_multiple = (
+        PACKED_EFFECT_REL_ENVELOPE / emulated_worst
+        if emulated_worst > 0.0
+        else None
+    )
     return {
         "torch": torch.__version__,
         "bitsandbytes": bitsandbytes.__version__,
@@ -319,6 +372,9 @@ def run_probe(*, m_values=M_VALUES, shapes=FIXTURE_SHAPES) -> dict:
         "training_control_exact": all(
             row.training_vs_variant2_max_abs == 0.0 for row in rows
         ),
+        "packed_effect_rel_envelope": PACKED_EFFECT_REL_ENVELOPE,
+        "emulated_bf16_worst_rel": emulated_worst,
+        "envelope_over_emulated_worst": envelope_multiple,
         **verdict,
     }
 
