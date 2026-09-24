@@ -226,7 +226,16 @@ into a scratch directory, not the config's `output`. The first `--warmup` steps 
 left out of the timing. It measures `task: sft` on the transformers backend and refuses any other
 task or backend by name.
 
-It exits **1** when any check fails. The report is still written, with the failures in it:
+It exits **1** in two different ways, and only one of them leaves a report:
+
+- **Pre-flight refusals write no report.** A task or backend it does not measure, `--steps` not
+  above `--warmup`, and a model with zero trainable parameters are all refused before training
+  starts. Nothing is written to `-o`; the reason is printed.
+- **Post-run check failures write the report**, with `valid: false` and one entry per failed
+  check in `failures`. A run that did not train is a result, and the file keeps the evidence.
+
+The checks, all run on the finished report (`trainable_parameters` is also the pre-flight
+refusal above, so in ordinary use it fires there and writes nothing):
 
 | check | fails when |
 |---|---|
@@ -245,11 +254,11 @@ Report fields:
 |---|---|
 | `valid`, `failures` | the verdict, and one `{check, message}` per failed check |
 | `checks` | `trainable_parameters` (count), `grad_norm` (state), `parameters_changed` (bool) |
-| `timing` | `median_seconds`, `p95_seconds` (nearest-rank), `counted_steps`, `warmup_steps_discarded`, `total_seconds` |
+| `timing` | `median_seconds`, `p95_seconds` (nearest-rank), `counted_steps`, `warmup_steps_discarded`, `total_seconds`, and `step_seconds`: every counted step's time in run order, so a run that changed mode mid-flight shows where |
 | `tokens` | `useful` (supervised: `labels != -100`), `total`, and `utilisation` (`useful / total`), counted from the batches `training_step` received |
 | `throughput` | `useful_tokens_per_second` and `total_tokens_per_second` |
 | `memory` | `max_memory_allocated_bytes` and `max_memory_reserved_bytes`, kept separate and read after `reset_peak_memory_stats`. Both are `null` off CUDA. Never read from `nvidia-smi` |
-| `provenance` | device, card, CUDA runtime, compute capability, driver version, SM clock after the run (`sm_clock_mhz_after_run`, read with `nvidia-smi`; memory never is), platform, Python, package versions (torch, transformers, peft, trl, bitsandbytes, accelerate), dtype, optimizer, seed, data seed |
+| `provenance` | device, card, CUDA runtime, compute capability, driver version, SM clock during the counted steps (`sm_clock_mhz_busy`: `min`, `median`, `max` and `sample_count` of `nvidia-smi` samples kept only from the post-warm-up steps. Queries start on a 100 ms schedule, and a slower query skips ticks. Each is timestamped at the midpoint of its query, taken for torch's own device by PCI bus id (nvidia-smi's first GPU when torch does not report one); memory is never read this way. With no sample in the window the numbers are `null`, and `unavailable_reason` says why: `"not a CUDA run"`, `"no nvidia-smi tool found"`, `"nvidia-smi returned no readable SM clock"`, or `"no sample fell inside the counted steps"` (a run too short for the schedule). It is `null` whenever there are numbers), platform, Python, package versions (torch, transformers, peft, trl, bitsandbytes, accelerate), dtype, optimizer, seed, data seed |
 | `config_hash`, `resolved_config` | sha256 of the fully resolved config, and the config itself, so a schema-default change that moves a run shows up (#716) |
 | `steps_requested`, `steps_measured` | what was asked for and what ran |
 
