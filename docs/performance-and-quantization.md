@@ -811,6 +811,8 @@ PPO, GRPO, or Online DPO data is rendered. The saved tokenizer keeps the same te
 for inference. Tasks that do not render chat (`pretrain`, `embedding`, `classifier`,
 `reranker`, `cross_encoder`, `prm`, `asr`, `moe_lora_routing`, and `unlearn`) reject
 `data.chat_template` instead of silently ignoring it.
+An unregistered template name is refused by `soup train` and `soup data preprocess`
+before the model loads, and the message lists the known names.
 
 Raw Jinja strings are validated: null bytes / >64KB / filesystem-touching directives (`{% include %}`, `{% import %}`, `{% from %}`, `{% macro %}`, `{% extends %}`) are rejected at config-load.
 

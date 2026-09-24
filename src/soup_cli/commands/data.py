@@ -19,6 +19,7 @@ from soup_cli.utils.embed import DEFAULT_EMBED_MODEL, embed_texts
 from soup_cli.utils.exit_codes import EXIT_GATE_FAILED, EXIT_USAGE_ERROR, GateCommand
 from soup_cli.utils.paths import is_under_cwd
 from soup_cli.utils.semdedup import DedupReport, greedy_semdedup
+from soup_cli.utils.terminal import for_terminal
 
 console = Console()
 
@@ -2453,7 +2454,11 @@ def preprocess_dataset(
 
     dataset_path = _cache_key_dataset_path(cfg)
     # #1067: render with data.chat_template, as the live path does, and key on it.
-    chat_template = resolve_chat_template(cfg.data.chat_template)
+    try:
+        chat_template = resolve_chat_template(cfg.data.chat_template)
+    except KeyError as exc:
+        console.print(f"[red]Invalid data.chat_template:[/] {for_terminal(exc.args[0])}")
+        raise typer.Exit(1) from exc
     train_display = (
         ", ".join(cfg.data.train) if isinstance(cfg.data.train, list) else cfg.data.train
     )

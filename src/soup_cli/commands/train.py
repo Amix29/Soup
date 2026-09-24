@@ -701,6 +701,17 @@ def train(
         console.print(f"[red]{markup_escape(str(exc))}[/]")
         raise typer.Exit(code=2) from exc
 
+    # An unregistered data.chat_template name raises KeyError in the trainer,
+    # after the model has loaded. Check it before anything is downloaded.
+    from soup_cli.data.chat_templates import resolve_chat_template
+    from soup_cli.utils.terminal import for_terminal
+
+    try:
+        resolve_chat_template(cfg.data.chat_template)
+    except KeyError as exc:
+        console.print(f"[red]Invalid data.chat_template:[/] {for_terminal(exc.args[0])}")
+        raise typer.Exit(1) from exc
+
     # v0.72.3 — --resume / --hf-resume now work with layer streaming. v0.72.0-.2
     # refused them because a streamed model's `named_parameters()` carry an
     # `.inner.` segment that `load_state_dict` narrows away, so PEFT matched
