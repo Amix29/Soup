@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import copy
+import types
+
 import pytest
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
@@ -21,7 +24,7 @@ def _randomise_b(model):
                 torch.nn.init.normal_(param, std=0.2)
 
 
-def _make_model(targets, *, ranks=None, bias=True):
+def _make_model(targets, *, ranks=None, bias=True, modules_to_save=None):
     _deps()
     import torch.nn as nn
     from peft import LoraConfig, inject_adapter_in_model
@@ -54,6 +57,7 @@ def _make_model(targets, *, ranks=None, bias=True):
             bias="none",
             target_modules=list(targets),
             rank_pattern=ranks or {},
+            modules_to_save=modules_to_save,
         ),
         model,
     )
@@ -128,7 +132,6 @@ class TestMath:
         assert torch.autograd.gradcheck(
             call, tuple(variables), eps=1e-6, atol=1e-5, rtol=1e-4
         )
-
 
     @pytest.mark.parametrize(
         "targets",
@@ -225,7 +228,6 @@ class TestCoordinator:
         for name in ("q_proj", "k_proj", "v_proj"):
             assert ("forward" in getattr(model.attn, name).__dict__) is had_instance[name]
 
-
     def test_checkpoint_non_reentrant_matches_plain(self):
         torch = _deps()
         from torch.utils.checkpoint import checkpoint
@@ -257,7 +259,6 @@ class TestCoordinator:
         for name, grad in _adapter_grads(model).items():
             torch.testing.assert_close(grad, ref_grads[name], msg=name)
 
-
     def test_mps_bfloat16_qv_default_is_finite(self):
         torch = _deps()
         if not torch.backends.mps.is_available():
@@ -274,19 +275,119 @@ class TestCoordinator:
         assert all(torch.isfinite(part).all() for part in (q, k, v))
         assert torch.isfinite(x.grad).all()
 
+    def test_cross_attention_different_kv_tensor_delegates_without_stale_cache(self):
+        torch = _deps()
+        from soup_cli.utils.fast_lora_qkv import patch_fast_lora_qkv
+
+        model = _make_model(("q_proj", "k_proj", "v_proj"))
+        query = torch.randn(2, 3, 8, requires_grad=True)
+        memory = torch.randn(2, 5, 8, requires_grad=True)
+        reference_q = model.attn.q_proj(query)
+        reference_k = model.attn.k_proj(memory)
+        reference_v = model.attn.v_proj(memory)
+
+        assert patch_fast_lora_qkv(model) == 1
+        q = model.attn.q_proj(query)
+        k = model.attn.k_proj(memory)
+        v = model.attn.v_proj(memory)
+
+        torch.testing.assert_close(q, reference_q)
+        torch.testing.assert_close(k, reference_k)
+        torch.testing.assert_close(v, reference_v)
+        assert type(q.grad_fn).__name__ == "_FastLoraQKVBackward"
+        assert type(k.grad_fn).__name__ != "_FastLoraQKVBackward"
+        assert type(v.grad_fn).__name__ != "_FastLoraQKVBackward"
+        assert getattr(model.attn, "_soup_fast_lora_qkv_cache", None) is None
+        assert getattr(model.attn, "_soup_fast_lora_qkv_last_cache_hits") == (0, ())
+
+    def test_modules_to_save_projection_keeps_peft_ownership(self):
+        _deps()
+        from soup_cli.utils.fast_lora_qkv import patch_fast_lora_qkv
+
+        model = _make_model(
+            ("q_proj", "v_proj"), modules_to_save=["k_proj"]
+        )
+        assert hasattr(model.attn.k_proj, "modules_to_save")
+        assert patch_fast_lora_qkv(model) == 0
+
+    def test_qkv_owns_projections_until_unpatched(self):
+        torch = _deps()
+        from soup_cli.utils.fast_lora import patch_fast_lora_single_projection
+        from soup_cli.utils.fast_lora_qkv import patch_fast_lora_qkv, unpatch_fast_lora_qkv
+
+        model = _make_model(("q_proj", "k_proj", "v_proj"))
+        assert patch_fast_lora_qkv(model) == 1
+        assert patch_fast_lora_single_projection(model) == 0
+
+        replacement = lambda _self, x: torch.zeros_like(x)  # noqa: E731
+        model.attn.q_proj.forward = types.MethodType(replacement, model.attn.q_proj)
+        assert unpatch_fast_lora_qkv(model) == 1
+        assert model.attn.q_proj.forward.__func__ is replacement
+
+    def test_real_peft_8bit_layers_are_not_patched(self):
+        _deps()
+        bnb = pytest.importorskip("bitsandbytes")
+        import torch.nn as nn
+        from peft import LoraConfig, inject_adapter_in_model
+
+        from soup_cli.utils.fast_lora_qkv import patch_fast_lora_qkv
+
+        class Attention(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.q_proj = bnb.nn.Linear8bitLt(8, 8, bias=False)
+                self.k_proj = bnb.nn.Linear8bitLt(8, 4, bias=False)
+                self.v_proj = bnb.nn.Linear8bitLt(8, 4, bias=False)
+
+        class Model(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.is_loaded_in_8bit = True
+                self.attn = Attention()
+
+        model = Model()
+        inject_adapter_in_model(
+            LoraConfig(
+                r=2,
+                lora_alpha=4,
+                target_modules=["q_proj", "k_proj", "v_proj"],
+            ),
+            model,
+        )
+        assert all(
+            type(getattr(model.attn, name)).__name__ == "Linear8bitLt"
+            for name in ("q_proj", "k_proj", "v_proj")
+        )
+        assert patch_fast_lora_qkv(model) == 0
+
 
 class TestFastPathIsActuallyTaken:
+    @pytest.mark.parametrize(
+        ("targets", "ranks"),
+        [
+            pytest.param(("q_proj",), None, id="q"),
+            pytest.param(("k_proj",), None, id="k"),
+            pytest.param(("v_proj",), None, id="v"),
+            pytest.param(("q_proj", "v_proj"), None, id="qv"),
+            pytest.param(("q_proj", "k_proj", "v_proj"), None, id="qkv-equal"),
+            pytest.param(
+                ("q_proj", "k_proj", "v_proj"),
+                {"q_proj": 2, "k_proj": 3, "v_proj": 4},
+                id="qkv-unequal",
+            ),
+        ],
+    )
     @pytest.mark.parametrize("bias", [True, False], ids=["bias", "no-bias"])
     @pytest.mark.parametrize("shape", [(4, 8), (2, 3, 8)], ids=["2d", "3d"])
     @pytest.mark.parametrize("dtype_name", ["float32", "bfloat16"], ids=["fp32", "bf16"])
     def test_all_three_outputs_come_from_the_fused_kernel(
-        self, bias, shape, dtype_name
+        self, targets, ranks, bias, shape, dtype_name
     ):
         torch = _deps()
         from soup_cli.utils.fast_lora_qkv import patch_fast_lora_qkv
 
         dtype = getattr(torch, dtype_name)
-        model = _make_model(("q_proj", "v_proj"), bias=bias).to(dtype=dtype)
+        model = _make_model(targets, ranks=ranks, bias=bias).to(dtype=dtype)
         x = torch.randn(*shape, dtype=dtype, requires_grad=True)
 
         before = model(x)
@@ -302,6 +403,25 @@ class TestFastPathIsActuallyTaken:
         hits, grad_fns = getattr(model.attn, "_soup_fast_lora_qkv_last_cache_hits")
         assert hits == 2
         assert grad_fns == ("_FastLoraQKVBackward",) * 3
+
+    def test_cpu_autocast_preserves_pefts_bfloat16_outputs(self):
+        torch = _deps()
+        from soup_cli.utils.fast_lora_qkv import patch_fast_lora_qkv
+
+        torch.manual_seed(31)
+        model = _make_model(("q_proj", "k_proj", "v_proj"))
+        x = torch.randn(2, 5, 8, requires_grad=True)
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            reference = model(x)
+        assert all(part.dtype == torch.bfloat16 for part in reference)
+
+        assert patch_fast_lora_qkv(model) == 1
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            output = model(x)
+        assert all(part.dtype == torch.bfloat16 for part in output)
+        assert all(
+            type(part.grad_fn).__name__ == "_FastLoraQKVBackward" for part in output
+        )
 
     def test_non_contiguous_three_dimensional_input_stays_on_fast_path(self):
         torch = _deps()
@@ -319,7 +439,8 @@ class TestFastPathIsActuallyTaken:
         assert all(type(part.grad_fn).__name__ == "_FastLoraQKVBackward" for part in got)
 
     @pytest.mark.gpu
-    def test_nf4_qkv_outputs_are_from_the_fused_kernel(self):
+    @pytest.mark.parametrize("seed", [3, 7, 11])
+    def test_nf4_qkv_forward_backward_matches_unpatched_peft(self, seed):
         torch = _deps()
         bnb = pytest.importorskip("bitsandbytes")
         import torch.nn as nn
@@ -358,18 +479,159 @@ class TestFastPathIsActuallyTaken:
                 lora_alpha=4,
                 lora_dropout=0.0,
                 bias="none",
-                target_modules=["q_proj", "v_proj"],
+                target_modules=["q_proj", "k_proj", "v_proj"],
             ),
             model,
         )
         _randomise_b(model)
-        assert model.attn.q_proj.get_base_layer().weight.quant_state is not None
-        x = torch.randn(2, 3, 8, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        assert all(
+            getattr(model.attn, name).get_base_layer().weight.quant_state is not None
+            for name in ("q_proj", "k_proj", "v_proj")
+        )
+        reference = copy.deepcopy(model)
+        torch.manual_seed(seed)
+        x_ref = torch.randn(
+            2, 3, 8, device="cuda", dtype=torch.bfloat16, requires_grad=True
+        )
+        expected = reference(x_ref)
+        sum(part.float().square().mean() for part in expected).backward()
+        expected_x_grad = x_ref.grad.detach().clone()
+        expected_grads = _adapter_grads(reference)
+
+        x = x_ref.detach().clone().requires_grad_(True)
         assert patch_fast_lora_qkv(model) == 1
         out = model(x)
         assert all(type(part.grad_fn).__name__ == "_FastLoraQKVBackward" for part in out)
+        sum(part.float().square().mean() for part in out).backward()
         hits, _ = getattr(model.attn, "_soup_fast_lora_qkv_last_cache_hits")
         assert hits == 2
+        for actual, wanted in zip(out, expected):
+            torch.testing.assert_close(actual, wanted, rtol=1e-2, atol=1e-2)
+        torch.testing.assert_close(x.grad, expected_x_grad, rtol=1e-2, atol=1e-2)
+        got_grads = _adapter_grads(model)
+        assert got_grads.keys() == expected_grads.keys()
+        for name, grad in got_grads.items():
+            torch.testing.assert_close(
+                grad, expected_grads[name], rtol=1e-2, atol=1e-2, msg=name
+            )
+
+
+class TestStreamedModel:
+    def test_qkv_kernel_matches_resident_peft_across_reused_stream_buffers(
+        self, tmp_path
+    ):
+        torch = _deps()
+        pytest.importorskip("transformers")
+        pytest.importorskip("safetensors")
+        from peft import LoraConfig, TaskType, get_peft_model
+        from safetensors.torch import save_file
+        from transformers import AutoModelForCausalLM, LlamaConfig, LlamaForCausalLM
+
+        from soup_cli.utils.fast_lora_qkv import patch_fast_lora_qkv
+        from soup_cli.utils.layer_shard import shard_checkpoint
+        from soup_cli.utils.layer_stream_runtime import build_streamed_model
+
+        def lora_config():
+            return LoraConfig(
+                r=2,
+                lora_alpha=4,
+                lora_dropout=0.0,
+                bias="none",
+                target_modules=["q_proj", "k_proj", "v_proj"],
+                task_type=TaskType.CAUSAL_LM,
+            )
+
+        torch.manual_seed(43)
+        config = LlamaConfig(
+            vocab_size=64,
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=4,
+            num_attention_heads=2,
+            num_key_value_heads=2,
+            tie_word_embeddings=False,
+            max_position_embeddings=64,
+        )
+        weights = tmp_path / "model"
+        weights.mkdir(parents=True, exist_ok=True)
+        save_file(
+            {
+                key: value.contiguous()
+                for key, value in LlamaForCausalLM(config).state_dict().items()
+            },
+            str(weights / "model.safetensors"),
+        )
+        config.save_pretrained(str(weights))
+
+        shards = str(tmp_path / "shards")
+        index = shard_checkpoint(str(weights), shards, dtype="float32", arch="llama")
+        streamed, _runtime = build_streamed_model(
+            model_id=str(weights),
+            shard_dir=shards,
+            index=index,
+            lora_config=lora_config(),
+            device="cpu",
+            dtype="float32",
+            buffers=2,
+            pin=False,
+            seed=5,
+        )
+        assert patch_fast_lora_qkv(streamed) == 4
+        _randomise_b(streamed)
+
+        resident = get_peft_model(
+            AutoModelForCausalLM.from_pretrained(str(weights), dtype=torch.float32),
+            lora_config(),
+        )
+        resident_params = dict(resident.named_parameters())
+        copied = 0
+        for name, parameter in streamed.named_parameters():
+            if "lora_" not in name or parameter.is_meta:
+                continue
+            target = next(
+                (
+                    candidate
+                    for candidate_name, candidate in resident_params.items()
+                    if candidate_name.endswith(name)
+                ),
+                None,
+            )
+            assert target is not None, f"resident model has no parameter ending in {name!r}"
+            with torch.no_grad():
+                target.copy_(parameter)
+            copied += 1
+        assert copied == 24
+
+        input_ids = torch.randint(0, 64, (1, 8))
+        labels = torch.randint(0, 64, (1, 8))
+        streamed_loss = streamed(input_ids=input_ids, labels=labels).loss
+        streamed_loss.backward()
+        resident_loss = resident(input_ids=input_ids, labels=labels).loss
+        resident_loss.backward()
+
+        torch.testing.assert_close(streamed_loss, resident_loss, rtol=1e-5, atol=1e-5)
+        streamed_grads = {
+            name: parameter.grad
+            for name, parameter in streamed.named_parameters()
+            if "lora_" in name and parameter.grad is not None
+        }
+        resident_grads = {
+            name: parameter.grad
+            for name, parameter in resident.named_parameters()
+            if "lora_" in name and parameter.grad is not None
+        }
+        assert len(streamed_grads) == len(resident_grads) == 24
+        for name, grad in streamed_grads.items():
+            target = next(
+                (
+                    candidate
+                    for candidate_name, candidate in resident_grads.items()
+                    if candidate_name.endswith(name)
+                ),
+                None,
+            )
+            assert target is not None, f"no resident gradient for {name!r}"
+            torch.testing.assert_close(grad, target, rtol=1e-4, atol=1e-5, msg=name)
 
 
 class TestRealLlamaAttention:

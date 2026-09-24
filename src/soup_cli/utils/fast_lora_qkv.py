@@ -1,8 +1,10 @@
 """Fast-LoRA shared-X Q/K/V autograd path for issue #838.
 
 The q projection computes Q/K/V together and caches K/V only until the next
-two projection calls. This avoids copying architecture-specific attention
-forwards while still sharing one X@A_cat.T GEMM.
+two projection calls with the identical input object. Cross-attention calls
+that use a different key/value tensor delegate to PEFT; the speculative K/V
+computed by q_proj are then discarded. This avoids copying architecture-
+specific attention forwards while still sharing one X@A_cat.T GEMM.
 
 A lone q_proj call intentionally retains one {x, k, v} graph until the next q
 call or unpatch. That is bounded to one attention module rather than a leak,
@@ -16,9 +18,12 @@ import types
 from typing import Any
 
 from soup_cli.utils.fast_lora import (
+    _FORWARD_OWNER_MARKER,
+    _GROUP_PATCH_OWNER_MARKER,
     _as_dtype,
     _dense_weight,
     _flatten,
+    _is_supported_lora_projection,
     _projection_state,
 )
 
@@ -26,6 +31,7 @@ _PATCH_MARKER = "_soup_fast_lora_qkv"
 _CACHE_MARKER = "_soup_fast_lora_qkv_cache"
 _CACHE_HIT_MARKER = "_soup_fast_lora_qkv_last_cache_hits"
 _RESTORE_MARKER = "_soup_fast_lora_qkv_restore"
+_OWNER = "qkv"
 _FUNCTION: Any = None
 
 __all__ = ["patch_fast_lora_qkv", "unpatch_fast_lora_qkv"]
@@ -58,7 +64,6 @@ def _qkv_function() -> Any:
             for weight, bias, meta, parts in zip(weights, biases, metas, qlists):
                 dense = _dense_weight(weight, meta, parts, x.dtype)
                 outs.append(
-
                     functional.linear(
                         x, dense, _as_dtype(bias, x.dtype) if bias is not None else None
                     )
@@ -215,7 +220,7 @@ def _install_attention_patch(attn: Any) -> None:
             q.qmeta, k.qmeta, v.qmeta,
             *qparts,
         )
-        if q_out.dtype != input_dtype:
+        if work_x is not x:
             q_out = q_out.to(input_dtype)
             k_out = k_out.to(input_dtype)
             v_out = v_out.to(input_dtype)
@@ -257,16 +262,22 @@ def _install_attention_patch(attn: Any) -> None:
         setattr(attn, _CACHE_HIT_MARKER, (0, ()))
         return originals["v_proj"](x, *args, **kwargs)
 
-    projections["q_proj"].forward = types.MethodType(q_forward, projections["q_proj"])
-    projections["k_proj"].forward = types.MethodType(k_forward, projections["k_proj"])
-    projections["v_proj"].forward = types.MethodType(v_forward, projections["v_proj"])
+    for forward in (q_forward, k_forward, v_forward):
+        setattr(forward, _FORWARD_OWNER_MARKER, _OWNER)
+    for name, forward in (
+        ("q_proj", q_forward),
+        ("k_proj", k_forward),
+        ("v_proj", v_forward),
+    ):
+        projection = projections[name]
+        setattr(projection, _GROUP_PATCH_OWNER_MARKER, _OWNER)
+        projection.forward = types.MethodType(forward, projection)
     setattr(attn, "_soup_fast_lora_qkv_originals", originals)
     setattr(attn, _RESTORE_MARKER, restore)
     setattr(attn, _PATCH_MARKER, True)
 
 
 def patch_fast_lora_qkv(model: Any) -> int:
-
     """Patch structural q_proj/k_proj/v_proj attention modules."""
     count = 0
     for module in model.modules():
@@ -277,6 +288,21 @@ def patch_fast_lora_qkv(model: Any) -> int:
         if not any(
             hasattr(getattr(module, name), "lora_A")
             for name in ("q_proj", "k_proj", "v_proj")
+        ):
+            continue
+        projections = [
+            getattr(module, name) for name in ("q_proj", "k_proj", "v_proj")
+        ]
+        if any(hasattr(proj, "modules_to_save") for proj in projections):
+            continue
+        if any(
+            hasattr(proj, "lora_A") and not _is_supported_lora_projection(proj)
+            for proj in projections
+        ):
+            continue
+        if any(
+            getattr(proj, _GROUP_PATCH_OWNER_MARKER, None) is not None
+            for proj in projections
         ):
             continue
         _install_attention_patch(module)
@@ -293,10 +319,13 @@ def unpatch_fast_lora_qkv(model: Any) -> int:
             continue
         for name, (had_instance_forward, instance_forward) in restore.items():
             proj = getattr(module, name)
-            if had_instance_forward:
-                proj.forward = instance_forward
-            elif "forward" in proj.__dict__:
-                delattr(proj, "forward")
+            if getattr(proj.forward, _FORWARD_OWNER_MARKER, None) == _OWNER:
+                if had_instance_forward:
+                    proj.forward = instance_forward
+                elif "forward" in proj.__dict__:
+                    delattr(proj, "forward")
+            if getattr(proj, _GROUP_PATCH_OWNER_MARKER, None) == _OWNER:
+                delattr(proj, _GROUP_PATCH_OWNER_MARKER)
         for attr in (
             _CACHE_MARKER,
             _CACHE_HIT_MARKER,
