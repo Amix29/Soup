@@ -845,7 +845,7 @@ training:
   quantization: 4bit
 ```
 
-Soup auto-detects MoE architectures. Works with all training tasks.
+Soup auto-detects MoE architectures. Not every task reads `moe_lora`: the per-task table in [Performance and quantization](performance-and-quantization.md#moe-expert-quantization--router-only-training-live-in-v07120) lists the tasks that apply it and the ones that refuse it at config load.
 
 ```bash
 soup init --template moe
