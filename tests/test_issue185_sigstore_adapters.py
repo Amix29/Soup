@@ -381,3 +381,86 @@ def test_interactive_oidc_refuses_non_sigstore_backend(tmp_path, monkeypatch):
     )
     assert result.exit_code == 2, result.output
     assert "--interactive-oidc requires --backend sigstore" in result.output
+
+
+@pytest.mark.parametrize(("strict", "code"), [(False, 1), (True, 3)])
+def test_cli_verify_reports_missing_sigstore_extra(
+    tmp_path, monkeypatch, strict, code
+):
+    import builtins
+
+    from soup_cli.commands.adapters import app
+    from soup_cli.utils.adapter_sign import sign_adapter
+
+    adir = _adapter(tmp_path, monkeypatch)
+    sign_adapter(str(adir), backend="unsigned")
+    sig = adir / ".soup-signature.json"
+    rec = json.loads(sig.read_text(encoding="utf-8"))
+    rec.update(backend="sigstore", sigstore_bundle='{"bundle":"ok"}')
+    sig.write_text(json.dumps(rec), encoding="utf-8")
+
+    real_import = builtins.__import__
+
+    def force_missing_sigstore(name, *args, **kwargs):
+        if name == "sigstore" or name.startswith("sigstore."):
+            raise ImportError("forced missing sigstore")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", force_missing_sigstore)
+    args = [
+        "verify",
+        str(adir),
+        "--cert-identity",
+        "trusted@example.com",
+        "--cert-oidc-issuer",
+        "https://issuer.example",
+    ]
+    if strict:
+        args.append("--strict")
+
+    result = CliRunner().invoke(app, args)
+    assert result.exit_code == code, (result.output, repr(result.exception))
+    assert "soup-cli[sigstore]" in _clean_output(result.output)
+
+
+def test_sigstore_sign_refuses_directory_target_before_external_signer(
+    tmp_path, monkeypatch
+):
+    from soup_cli.utils import sigstore_signing
+    from soup_cli.utils.adapter_sign import sign_adapter
+
+    adir = _adapter(tmp_path, monkeypatch)
+    (adir / ".soup-signature.json").mkdir()
+    calls = {"n": 0}
+
+    def fake_sign(payload, *, interactive=False):
+        calls["n"] += 1
+        return '{"bundle":"ok"}'
+
+    monkeypatch.setattr(sigstore_signing, "sign_payload_sigstore", fake_sign)
+
+    with pytest.raises(ValueError, match="must be a regular file"):
+        sign_adapter(str(adir), backend="sigstore")
+
+    assert calls["n"] == 0
+
+
+def test_cli_sign_sanitizes_runtime_error_control_bytes(tmp_path, monkeypatch):
+    from soup_cli.commands.adapters import app
+    from soup_cli.utils import adapter_sign
+
+    adir = _adapter(tmp_path, monkeypatch)
+    attack = "\x1b]0;SPOOFED\x07\x1b[2J\x1b[H"
+
+    def fail_sign(*_args, **_kwargs):
+        raise RuntimeError(attack)
+
+    monkeypatch.setattr(adapter_sign, "sign_adapter", fail_sign)
+    result = CliRunner().invoke(
+        app, ["sign", str(adir), "--backend", "sigstore"]
+    )
+
+    assert result.exit_code == 1
+    out = _SGR.sub("", result.output)
+    assert "\x1b" not in out and "\x07" not in out
+    assert "SPOOFED" in out

@@ -221,3 +221,52 @@ def test_sigstore_internal_value_error_is_runtime_failure(monkeypatch):
 
     with pytest.raises(RuntimeError, match="Sigstore keyless signing failed"):
         sign_payload_sigstore(b"payload")
+
+
+@pytest.mark.parametrize("identity", ["", "   "])
+def test_verify_helper_rejects_empty_identity_before_policy(monkeypatch, identity):
+    from soup_cli.utils.sigstore_signing import verify_payload_sigstore
+
+    seen = _install_fake_verify_sigstore(monkeypatch)
+    with pytest.raises(ValueError, match="non-empty trusted identity"):
+        verify_payload_sigstore(
+            b"payload",
+            '{"bundle":"ok"}',
+            identity=identity,
+            issuer="https://issuer.example",
+        )
+
+    assert "identity" not in seen
+
+
+def test_verify_helper_wraps_sigstore_verification_error(monkeypatch):
+    from soup_cli.utils.sigstore_signing import verify_payload_sigstore
+
+    _install_fake_verify_sigstore(monkeypatch)
+
+    class VerificationError(Exception):
+        pass
+
+    class RejectingVerifier:
+        @classmethod
+        def production(cls):
+            return cls()
+
+        def verify_artifact(self, payload, bundle, policy):
+            raise VerificationError(
+                "Certificate's SANs do not match trusted@example.com"
+            )
+
+    monkeypatch.setattr(
+        sys.modules["sigstore.verify"], "Verifier", RejectingVerifier
+    )
+
+    with pytest.raises(
+        ValueError, match="Sigstore verification failed: Certificate's SANs"
+    ):
+        verify_payload_sigstore(
+            b"payload",
+            '{"bundle":"ok"}',
+            identity="trusted@example.com",
+            issuer="https://issuer.example",
+        )

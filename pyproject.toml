@@ -168,7 +168,7 @@ mix = ["scikit-optimize>=0.9.0"]
 data-pro = ["langdetect>=1.0.9", "presidio-analyzer>=2.2.0"]
 # v0.71.2 #185 — small offline ed25519 signing extra.
 sign = ["cryptography>=41.0.0"]
-# v0.76.0 #185 — Sigstore keyless OIDC/Fulcio/Rekor stack. Kept separate so
+# #185 — Sigstore keyless OIDC/Fulcio/Rekor stack. Kept separate so
 # air-gapped ed25519 users do not pull the network/transparency dependencies.
 sigstore = ["sigstore>=4.4.0,<5.0.0"]
 # v0.71.3 #181 — reportlab PDF rendering for `soup train --annex-xi *.pdf`.

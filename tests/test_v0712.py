@@ -33,7 +33,7 @@ def _strip_ansi(text: str) -> str:
     """
     import re
 
-    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+    return " ".join(re.sub(r"\x1b\[[0-9;]*m", "", text).split())
 
 
 # ---------------------------------------------------------------------------

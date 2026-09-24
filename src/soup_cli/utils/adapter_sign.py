@@ -373,6 +373,20 @@ def sign_adapter(
         raise ValueError("--interactive-oidc requires --backend sigstore")
     manifest = compute_adapter_manifest(adapter_dir)
 
+    # Validate the final record path before any external signer can create a
+    # public transparency-log entry. A directory/symlink here would otherwise
+    # fail only after Sigstore/Fulcio/Rekor signing completed.
+    sig_path = os.path.join(adapter_dir, _SIGNATURE_FILENAME)
+    try:
+        st = os.lstat(sig_path)
+    except FileNotFoundError:
+        pass
+    else:
+        if stat.S_ISLNK(st.st_mode):
+            raise ValueError(f"{_SIGNATURE_FILENAME}: must not be a symlink")
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError(f"{_SIGNATURE_FILENAME}: must be a regular file")
+
     public_key = ""
     sigstore_bundle = ""
     if chosen == SignBackend.UNSIGNED:
