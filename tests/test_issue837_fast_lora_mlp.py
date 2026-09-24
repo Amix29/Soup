@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from types import SimpleNamespace
 
 import pytest
@@ -24,7 +25,14 @@ def _randomise_b(model):
 
 
 def _make_model(
-    targets, *, dropout=0.0, act="silu", module_act=None, ranks=None, bias=True
+    targets,
+    *,
+    dropout=0.0,
+    act="silu",
+    module_act=None,
+    ranks=None,
+    bias=True,
+    modules_to_save=None,
 ):
     _deps()
     import torch.nn as nn
@@ -59,6 +67,7 @@ def _make_model(
         bias="none",
         target_modules=list(targets),
         rank_pattern=ranks or {},
+        modules_to_save=modules_to_save,
     )
     inject_adapter_in_model(config, model)
     _randomise_b(model)
@@ -67,7 +76,6 @@ def _make_model(
 
 def _adapter_grads(model):
     return {
-
         name: p.grad.detach().clone()
         for name, p in model.named_parameters()
         if "lora_" in name and p.grad is not None
@@ -187,6 +195,7 @@ class TestPatching:
         assert patch_fast_lora_mlp(model) == 0
         assert unpatch_fast_lora_mlp(model) == 1
         assert unpatch_fast_lora_mlp(model) == 0
+        assert "forward" not in vars(model.mlp)
 
     def test_non_silu_activation_falls_back_without_patch(self):
         _deps()
@@ -214,6 +223,59 @@ class TestPatching:
         model(torch.randn(2, 8))
         assert calls == [True]
 
+    def test_modules_to_save_projection_keeps_peft_ownership(self):
+        _deps()
+        from soup_cli.utils.fast_lora_mlp import patch_fast_lora_mlp
+
+        model = _make_model(
+            ("gate_proj", "up_proj"), modules_to_save=["down_proj"]
+        )
+
+        assert hasattr(model.mlp.down_proj, "modules_to_save")
+        assert patch_fast_lora_mlp(model) == 0
+
+    def test_real_peft_8bit_layers_are_not_patched(self):
+        _deps()
+        bnb = pytest.importorskip("bitsandbytes")
+        import torch.nn as nn
+        from peft import LoraConfig, inject_adapter_in_model
+
+        from soup_cli.utils.fast_lora_mlp import patch_fast_lora_mlp
+
+        class Tiny8BitMLP(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.gate_proj = bnb.nn.Linear8bitLt(8, 12, bias=False)
+                self.up_proj = bnb.nn.Linear8bitLt(8, 12, bias=False)
+                self.down_proj = bnb.nn.Linear8bitLt(12, 8, bias=False)
+                self.act_fn = nn.SiLU()
+
+            def forward(self, x):
+                return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+
+        class Model(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.config = SimpleNamespace(hidden_act="silu")
+                self.is_loaded_in_8bit = True
+                self.mlp = Tiny8BitMLP()
+
+        model = Model()
+        inject_adapter_in_model(
+            LoraConfig(
+                r=2,
+                lora_alpha=4,
+                target_modules=["gate_proj", "up_proj", "down_proj"],
+            ),
+            model,
+        )
+
+        assert all(
+            type(getattr(model.mlp, name)).__name__ == "Linear8bitLt"
+            for name in ("gate_proj", "up_proj", "down_proj")
+        )
+        assert patch_fast_lora_mlp(model) == 0
+
     def test_saturation_is_finite_on_mps_bfloat16(self):
         torch = _deps()
         if not torch.backends.mps.is_available():
@@ -234,17 +296,34 @@ class TestPatching:
 
 
 class TestFastPathAndScope:
+    @pytest.mark.parametrize(
+        ("targets", "ranks"),
+        [
+            pytest.param(("gate_proj",), None, id="gate"),
+            pytest.param(("up_proj",), None, id="up"),
+            pytest.param(("down_proj",), None, id="down"),
+            pytest.param(("gate_proj", "down_proj"), None, id="gate-down"),
+            pytest.param(
+                ("gate_proj", "up_proj", "down_proj"), None, id="all-equal-rank"
+            ),
+            pytest.param(
+                ("gate_proj", "up_proj", "down_proj"),
+                {"gate_proj": 2, "up_proj": 3, "down_proj": 4},
+                id="all-unequal-rank",
+            ),
+        ],
+    )
     @pytest.mark.parametrize("bias", [True, False], ids=["bias", "no-bias"])
     @pytest.mark.parametrize("shape", [(4, 8), (2, 5, 8)], ids=["2d", "3d"])
     @pytest.mark.parametrize("dtype_name", ["float32", "bfloat16"], ids=["fp32", "bf16"])
-    def test_kernel_is_taken_across_bias_rank_and_dtype(self, bias, shape, dtype_name):
+    def test_kernel_is_taken_across_targets_bias_rank_and_dtype(
+        self, targets, ranks, bias, shape, dtype_name
+    ):
         torch = _deps()
         from soup_cli.utils.fast_lora_mlp import patch_fast_lora_mlp
 
         dtype = getattr(torch, dtype_name)
-        model = _make_model(
-            ("gate_proj", "up_proj", "down_proj"), bias=bias
-        ).to(dtype=dtype)
+        model = _make_model(targets, bias=bias, ranks=ranks).to(dtype=dtype)
         x = torch.randn(*shape, dtype=dtype, requires_grad=True)
         before = model(x)
         assert type(before.grad_fn).__name__ != "_FastLoraSwiGLUBackward"
@@ -252,6 +331,25 @@ class TestFastPathAndScope:
         assert patch_fast_lora_mlp(model) == 1
         out = model(x)
         assert type(out.grad_fn).__name__ == "_FastLoraSwiGLUBackward"
+
+    def test_cpu_autocast_preserves_pefts_bfloat16_output(self):
+        torch = _deps()
+        from soup_cli.utils.fast_lora_mlp import patch_fast_lora_mlp
+
+        torch.manual_seed(29)
+        model = _make_model(("gate_proj", "up_proj", "down_proj"))
+        x = torch.randn(2, 5, 8, requires_grad=True)
+
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            reference = model(x)
+        assert reference.dtype == torch.bfloat16
+
+        assert patch_fast_lora_mlp(model) == 1
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            output = model(x)
+
+        assert output.dtype == reference.dtype
+        assert type(output.grad_fn).__name__ == "_FastLoraSwiGLUBackward"
 
     def test_module_gelu_is_refused_even_when_parent_config_says_silu(self):
         _deps()
@@ -298,7 +396,8 @@ class TestFastPathAndScope:
         assert patch_fast_lora_mlp(model) == 0
 
     @pytest.mark.gpu
-    def test_nf4_kernel_is_taken(self):
+    @pytest.mark.parametrize("seed", [3, 7, 11])
+    def test_nf4_forward_backward_and_all_adapter_grads_match_peft(self, seed):
         torch = _deps()
         bnb = pytest.importorskip("bitsandbytes")
         import torch.nn as nn
@@ -332,6 +431,7 @@ class TestFastPathAndScope:
             def forward(self, x):
                 return self.mlp(x)
 
+        torch.manual_seed(seed)
         model = Model().to("cuda")
         inject_adapter_in_model(
             LoraConfig(
@@ -344,13 +444,151 @@ class TestFastPathAndScope:
             model,
         )
         _randomise_b(model)
-        assert model.mlp.gate_proj.get_base_layer().weight.quant_state is not None
-        x = torch.randn(2, 3, 8, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-        before = model(x)
-        assert type(before.grad_fn).__name__ != "_FastLoraSwiGLUBackward"
+        for name in ("gate_proj", "up_proj", "down_proj"):
+            assert getattr(model.mlp, name).get_base_layer().weight.quant_state is not None
+
+        reference_model = copy.deepcopy(model)
+        x_ref = torch.randn(
+            2, 3, 8, device="cuda", dtype=torch.bfloat16, requires_grad=True
+        )
+        reference = reference_model(x_ref)
+        assert type(reference.grad_fn).__name__ != "_FastLoraSwiGLUBackward"
+        reference.float().square().mean().backward()
+        reference_x_grad = x_ref.grad.detach().clone()
+        reference_grads = _adapter_grads(reference_model)
+
+        x = x_ref.detach().clone().requires_grad_(True)
         assert patch_fast_lora_mlp(model) == 1
         out = model(x)
         assert type(out.grad_fn).__name__ == "_FastLoraSwiGLUBackward"
+        out.float().square().mean().backward()
+
+        torch.testing.assert_close(out, reference, rtol=1e-2, atol=1e-2)
+        torch.testing.assert_close(x.grad, reference_x_grad, rtol=1e-2, atol=1e-2)
+        got_grads = _adapter_grads(model)
+        assert got_grads.keys() == reference_grads.keys()
+        for name, grad in got_grads.items():
+            torch.testing.assert_close(
+                grad, reference_grads[name], rtol=1e-2, atol=1e-2, msg=name
+            )
+
+
+class TestStreamedModel:
+    def test_mlp_kernel_matches_resident_peft_across_reused_stream_buffers(
+        self, tmp_path
+    ):
+        torch = _deps()
+        pytest.importorskip("transformers")
+        pytest.importorskip("safetensors")
+        from peft import LoraConfig, TaskType, get_peft_model
+        from safetensors.torch import save_file
+        from transformers import AutoModelForCausalLM, LlamaConfig, LlamaForCausalLM
+
+        from soup_cli.utils.fast_lora_mlp import patch_fast_lora_mlp
+        from soup_cli.utils.layer_shard import shard_checkpoint
+        from soup_cli.utils.layer_stream_runtime import build_streamed_model
+
+        def lora_config():
+            return LoraConfig(
+                r=2,
+                lora_alpha=4,
+                lora_dropout=0.0,
+                bias="none",
+                target_modules=["gate_proj", "up_proj", "down_proj"],
+                task_type=TaskType.CAUSAL_LM,
+            )
+
+        torch.manual_seed(41)
+        config = LlamaConfig(
+            vocab_size=64,
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=4,
+            num_attention_heads=2,
+            num_key_value_heads=2,
+            tie_word_embeddings=False,
+            max_position_embeddings=64,
+        )
+        weights = tmp_path / "model"
+        weights.mkdir(parents=True, exist_ok=True)
+        save_file(
+            {
+                key: value.contiguous()
+                for key, value in LlamaForCausalLM(config).state_dict().items()
+            },
+            str(weights / "model.safetensors"),
+        )
+        config.save_pretrained(str(weights))
+
+        shards = str(tmp_path / "shards")
+        index = shard_checkpoint(str(weights), shards, dtype="float32", arch="llama")
+        streamed, _runtime = build_streamed_model(
+            model_id=str(weights),
+            shard_dir=shards,
+            index=index,
+            lora_config=lora_config(),
+            device="cpu",
+            dtype="float32",
+            buffers=2,
+            pin=False,
+            seed=5,
+        )
+        assert patch_fast_lora_mlp(streamed) == 4
+        _randomise_b(streamed)
+
+        resident = get_peft_model(
+            AutoModelForCausalLM.from_pretrained(str(weights), dtype=torch.float32),
+            lora_config(),
+        )
+        resident_params = dict(resident.named_parameters())
+        copied = 0
+        for name, parameter in streamed.named_parameters():
+            if "lora_" not in name or parameter.is_meta:
+                continue
+            target = next(
+                (
+                    candidate
+                    for candidate_name, candidate in resident_params.items()
+                    if candidate_name.endswith(name)
+                ),
+                None,
+            )
+            assert target is not None, f"resident model has no parameter ending in {name!r}"
+            with torch.no_grad():
+                target.copy_(parameter)
+            copied += 1
+        assert copied == 24
+
+        input_ids = torch.randint(0, 64, (1, 8))
+        labels = torch.randint(0, 64, (1, 8))
+        streamed_loss = streamed(input_ids=input_ids, labels=labels).loss
+        streamed_loss.backward()
+        resident_loss = resident(input_ids=input_ids, labels=labels).loss
+        resident_loss.backward()
+
+        torch.testing.assert_close(streamed_loss, resident_loss, rtol=1e-5, atol=1e-5)
+        streamed_grads = {
+            name: parameter.grad
+            for name, parameter in streamed.named_parameters()
+            if "lora_" in name and parameter.grad is not None
+        }
+        resident_grads = {
+            name: parameter.grad
+            for name, parameter in resident.named_parameters()
+            if "lora_" in name and parameter.grad is not None
+        }
+        assert len(streamed_grads) == len(resident_grads) == 24
+        for name, grad in streamed_grads.items():
+            target = next(
+                (
+                    candidate
+                    for candidate_name, candidate in resident_grads.items()
+                    if candidate_name.endswith(name)
+                ),
+                None,
+            )
+            assert target is not None, f"no resident gradient for {name!r}"
+            torch.testing.assert_close(grad, target, rtol=1e-4, atol=1e-5, msg=name)
 
 
 class TestRealLlamaAndSavedBytes:
@@ -384,7 +622,6 @@ class TestRealLlamaAndSavedBytes:
                 r=2,
                 lora_alpha=4,
                 lora_dropout=0.0,
-
                 bias="none",
                 target_modules=["gate_proj", "up_proj", "down_proj"],
             ),
