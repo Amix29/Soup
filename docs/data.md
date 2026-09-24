@@ -1073,9 +1073,13 @@ would mask it (`data.train_on_responses_only` /
 built under one masking setting is refused — with the same
 `cache hash mismatch` error — when loaded under a different one. Caches written
 before this fix (tokenizer schema `v5` and earlier) have no `labels` and are
-rejected; re-run `soup data preprocess`. A `pre_tokenized` dataset you built
-yourself must carry its own `labels` column (`-100` on every token not to train
-on); without one it is refused rather than trained on every token.
+rejected; re-run `soup data preprocess`. With `task: sft`, a `pre_tokenized`
+dataset you built yourself must carry its own `labels` column (`-100` on every
+token not to train on); a train or validation split without one is refused
+rather than trained on every token. `task: pretrain` has no such check: a
+dataset without `labels` trains on every token, because TRL's collator copies
+`input_ids` into `labels`. That is the pretraining objective, and a
+`soup data preprocess` cache built for `task: pretrain` records the same labels.
 
 
 ## Data Recipe DAG Runner (`soup data recipe --execute`)
