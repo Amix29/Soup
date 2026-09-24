@@ -139,6 +139,39 @@ def test_llasa_setup_clears_exact_encode_device_before_base_setup(monkeypatch):
     assert seen["cache"] == {}
 
 
+def test_llasa_setup_clears_exact_encode_device_when_encoding_fails(monkeypatch):
+    from types import SimpleNamespace
+
+    from soup_cli.trainer.tts import TTSTrainerWrapper
+    from soup_cli.utils import tts_codec
+
+    wrapper = object.__new__(TTSTrainerWrapper)
+    wrapper.config = SimpleNamespace(
+        training=SimpleNamespace(tts_family="llasa", tts_emotion=None),
+        data=SimpleNamespace(format="audio", new_special_tokens=None),
+    )
+    wrapper.device = "cuda"
+    wrapper._tts_family = None
+
+    monkeypatch.setattr(
+        TTSTrainerWrapper, "_require_tts_codec", lambda self, family: None
+    )
+
+    def fake_encode(dataset, family, *, device=None, console=None):
+        assert family == "llasa"
+        assert device == "cuda"
+        tts_codec._XCODEC2_CACHE["cuda"] = (object(), object())
+        raise RuntimeError("encoding failed")
+
+    monkeypatch.setattr(tts_codec, "_XCODEC2_CACHE", {})
+    monkeypatch.setattr(tts_codec, "encode_tts_dataset", fake_encode)
+
+    with pytest.raises(RuntimeError, match="encoding failed"):
+        wrapper.setup({"train": []})
+
+    assert tts_codec._XCODEC2_CACHE == {}
+
+
 def test_floor_ci_pins_matching_torch_and_torchaudio():
     constraints = (
         ROOT / ".github" / "constraints" / "transformers-floor.txt"

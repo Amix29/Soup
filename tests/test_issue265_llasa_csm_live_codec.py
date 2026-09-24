@@ -105,7 +105,6 @@ class TestDispatch:
         with pytest.raises(RuntimeError, match="transformers>=5.16.1"):
             tts_codec._get_xcodec2_components()
 
-
     def test_component_loader_builds_extractor_before_model(self, monkeypatch):
         import sys
         from types import ModuleType

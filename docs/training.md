@@ -1632,7 +1632,10 @@ prepends the family's emotion control string to the first user turn.
 
 **Live-codec (hardware/dependency-gated).** Setting `data.format: audio` asks
 the trainer to encode raw audio **at train time**. Orpheus and Llasa are live on
-the codec-string path: Orpheus uses `pip install snac` at 24 kHz; Llasa uses Soup's `[audio]` extra (torchaudio + soundfile). Torchaudio must match the installed Torch release — recent torchaudio metadata may not make pip enforce that pairing — then Soup resamples to 16 kHz and calls the
+the codec-string path: Orpheus uses `pip install snac` at 24 kHz; Llasa uses
+Soup's `[audio]` extra (torchaudio + soundfile). Torchaudio must match the
+installed Torch release — recent torchaudio metadata may not make pip enforce
+that pairing — then Soup resamples to 16 kHz and calls the
 Transformers-native `HKUSTAudio/xcodec2-hf` codec, and
 renders the resulting ids as `<|s_ID|>` between Llasa's speech-generation
 boundary tokens. Audio remains duration/byte-capped and is read through an
