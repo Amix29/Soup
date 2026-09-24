@@ -261,8 +261,8 @@ soup llama cli|mtmd-cli|gguf-split|server|quantize ...  Proxy to the llama.cpp b
 soup quantize <model> --to <fmt>              Quantize a model — ergonomic alias for `soup export --format <fmt>`
 soup bom emit --name <n> --base-sha <hex> --config-sha <hex> --format cyclonedx|spdx|both  CycloneDX ML-BOM / SPDX AI bill of materials
 soup adapters scan <adapter>                  Spectral backdoor scan (rank-1 dominance + outlier detection)
-soup adapters sign <adapter> [--backend unsigned|ed25519] [--key <pem>|--generate-key <pem>]  Merkle manifest + ed25519 sign
-soup adapters verify <adapter> [--strict] [--public-key <pem>]  Verify manifest + ed25519 signature
+soup adapters sign <adapter> [--backend unsigned|ed25519|sigstore] [--key <pem>|--generate-key <pem>] [--interactive-oidc]  Merkle manifest + ed25519/Sigstore sign
+soup adapters verify <adapter> [--strict] [--public-key <pem>] [--cert-identity <san> --cert-oidc-issuer <url>]  Verify manifest + ed25519/Sigstore signature
 soup adapters check-safetensors <adapter> [--strict]  Refuse pickle / PyTorch-classic weights
 soup adapters merge ... [--license <id>] [--license-override <reason>] [--allow-unscanned]  License + backdoor-scan gates (auto-detect license; scan FAIL refused)
 soup adapters arithmetic "coder + 0.5*math - toxic" --adapter coder=<p> --adapter math=<p> --adapter toxic=<p> -o <out> [--allow-unscanned --allow-cross-base]  Task-vector algebra over LoRA adapters (add/scale/negate; same-rank; scan + same-base gated) (v0.71.34)
