@@ -154,6 +154,25 @@ def test_production_capability_gate_keeps_cpu_on_the_old_path():
     assert _can_use_checkpoint_visible_nf4_gemm(torch.randn(2, 16), state) is False
 
 
+def test_backward_refuses_a_recycled_stream_slot():
+    torch.manual_seed(31)
+    packed, state = bnb_functional.quantize_4bit(
+        torch.randn(16, 16), quant_type="nf4"
+    )
+    owner = {"current": 0}
+
+    def assert_owner():
+        if owner["current"] != 0:
+            raise RuntimeError("recycled weight slot")
+
+    packed._soup_stream_owner_check = assert_owner
+    x = torch.randn(3, 16, requires_grad=True)
+    output = checkpoint_visible_nf4_linear(x, packed, state)
+    owner["current"] = 1
+    with pytest.raises(RuntimeError, match="recycled weight slot"):
+        output.square().sum().backward()
+
+
 def test_streamed_layer_caches_substitution_views_for_one_pool_mapping(
     tmp_path, monkeypatch
 ):
@@ -195,3 +214,171 @@ def test_streamed_layer_caches_substitution_views_for_one_pool_mapping(
     third = layer._substituted_weights(other_mapping)
     assert third is not first
     assert calls["n"] == 2 * quantized
+
+
+@pytest.mark.gpu
+def test_missing_bnb_private_dispatch_symbols_fail_toward_the_safe_function(
+    monkeypatch,
+):
+    from bitsandbytes.backends.cuda import ops as bnb_cuda_ops
+
+    from soup_cli.utils.layer_stream_runtime import (
+        _can_use_checkpoint_visible_nf4_gemm,
+    )
+
+    weight = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+    _packed, state = bnb_functional.quantize_4bit(weight, quant_type="nf4")
+    x = torch.randn(3, 64, device="cuda", dtype=torch.bfloat16)
+    monkeypatch.delattr(bnb_cuda_ops, "_gemm_4bit_use_custom_fn")
+    assert _can_use_checkpoint_visible_nf4_gemm(x, state) is True
+
+
+@pytest.mark.gpu
+def test_fused_cuda_recycling_matches_private_buffer_and_plain_ctx_fails():
+    from torch.utils.checkpoint import checkpoint
+
+    from soup_cli.utils.layer_stream_runtime import (
+        _can_use_checkpoint_visible_nf4_gemm,
+    )
+
+    torch.manual_seed(37)
+    weight0 = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+    weight1 = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+    packed0, state0 = bnb_functional.quantize_4bit(weight0, quant_type="nf4")
+    packed1, state1 = bnb_functional.quantize_4bit(weight1, quant_type="nf4")
+    shared_packed = packed0.clone()
+    shared_absmax = state0.absmax.clone()
+    shared_state = _non_nested_state(shared_absmax, state0)
+    x = torch.randn(3, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    assert _can_use_checkpoint_visible_nf4_gemm(x, shared_state) is True
+
+    calls = {"visible": 0, "plain": 0}
+
+    def visible_body(value):
+        calls["visible"] += 1
+        with torch.no_grad():
+            shared_packed.copy_(packed0)
+            shared_absmax.copy_(state0.absmax)
+        return checkpoint_visible_nf4_linear(value, shared_packed, shared_state)
+
+    output = checkpoint(visible_body, x, use_reentrant=False)
+    with torch.no_grad():
+        shared_packed.copy_(packed1)
+        shared_absmax.copy_(state1.absmax)
+    output.float().square().sum().backward()
+
+    private_x = x.detach().clone().requires_grad_(True)
+    private = checkpoint_visible_nf4_linear(private_x, packed0, state0)
+    private.float().square().sum().backward()
+    assert calls["visible"] == 2
+    assert torch.equal(x.grad, private_x.grad)
+
+    class PlainCtx4Bit(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, value, packed):
+            ctx.packed = packed
+            ctx.state = shared_state
+            return torch.ops.bitsandbytes.gemm_4bit.default(
+                value,
+                packed,
+                shared_state.shape,
+                shared_state.absmax,
+                shared_state.blocksize,
+                shared_state.quant_type,
+            )
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            dense = bnb_functional.dequantize_4bit(ctx.packed, ctx.state).to(
+                grad_output.dtype
+            )
+            return torch.matmul(grad_output, dense), None
+
+    def plain_body(value):
+        calls["plain"] += 1
+        with torch.no_grad():
+            shared_packed.copy_(packed0)
+            shared_absmax.copy_(state0.absmax)
+        return PlainCtx4Bit.apply(value, shared_packed)
+
+    plain_x = x.detach().clone().requires_grad_(True)
+    plain = checkpoint(plain_body, plain_x, use_reentrant=False)
+    with torch.no_grad():
+        shared_packed.copy_(packed1)
+        shared_absmax.copy_(state1.absmax)
+    plain.float().square().sum().backward()
+    assert calls["plain"] == 1
+    assert not torch.equal(plain_x.grad, private_x.grad)
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize(
+    ("seq_len", "expects_function"),
+    [(8, True), (128, False)],
+    ids=["fused-m", "training-m"],
+)
+def test_streamed_matches_unpatched_resident_logits_and_all_lora_grads(
+    tmp_path, monkeypatch, seq_len, expects_function
+):
+    import bitsandbytes as bnb
+    from test_v07202 import (
+        _nf4_stream,
+        _randomise_lora_b,
+        _resident_nf4,
+        _sync_adapters,
+    )
+
+    import soup_cli.utils.layer_stream_runtime as runtime_module
+
+    streamed, _runtime, weights, _index, _shards = _nf4_stream(
+        tmp_path, device="cuda", dtype="bfloat16"
+    )
+    resident = _resident_nf4(weights, dtype="bfloat16", device=0)
+    _randomise_lora_b(resident)
+    assert _sync_adapters(streamed, resident) > 0
+
+    calls = {"function": 0, "streamed_matmul": 0, "resident_matmul": 0}
+    phase = {"name": "streamed"}
+    real_function = runtime_module.checkpoint_visible_nf4_linear
+    real_matmul = bnb.matmul_4bit
+
+    def counting_function(*args, **kwargs):
+        calls["function"] += 1
+        return real_function(*args, **kwargs)
+
+    def counting_matmul(*args, **kwargs):
+        calls[phase["name"] + "_matmul"] += 1
+        return real_matmul(*args, **kwargs)
+
+    monkeypatch.setattr(
+        runtime_module, "checkpoint_visible_nf4_linear", counting_function
+    )
+    monkeypatch.setattr(bnb, "matmul_4bit", counting_matmul)
+
+    generator = torch.Generator(device="cuda").manual_seed(41)
+    input_ids = torch.randint(
+        0, 64, (1, seq_len), device="cuda", generator=generator
+    )
+    streamed_logits = streamed(input_ids=input_ids, use_cache=False).logits
+    streamed_logits.float().square().mean().backward()
+    phase["name"] = "resident"
+    resident_logits = resident(input_ids=input_ids, use_cache=False).logits
+    resident_logits.float().square().mean().backward()
+
+    assert calls["streamed_matmul"] == 0
+    assert calls["resident_matmul"] > 0
+    assert (calls["function"] > 0) is expects_function
+    assert torch.equal(streamed_logits, resident_logits)
+
+    def adapter_grads(model):
+        return {
+            name.replace(".inner.", "."): parameter.grad
+            for name, parameter in model.named_parameters()
+            if "lora_" in name and parameter.grad is not None
+        }
+
+    streamed_grads = adapter_grads(streamed)
+    resident_grads = adapter_grads(resident)
+    assert streamed_grads and streamed_grads.keys() == resident_grads.keys()
+    for name, grad in streamed_grads.items():
+        assert torch.equal(grad, resident_grads[name]), name
