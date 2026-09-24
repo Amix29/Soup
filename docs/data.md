@@ -1010,7 +1010,7 @@ Pass `--live --base-yaml soup.yaml` to score each candidate with a short `soup t
 ## AOT Tokenization with `soup data preprocess`
 
 Pre-tokenize your dataset once and cache Arrow shards keyed by
-`(dataset, tokenizer, max_length, format, chat_template)`:
+`(dataset, tokenizer, max_length, format, chat_template, loss-mask mode)`:
 
 ```bash
 soup data preprocess soup.yaml --output ./tokenized_cache
@@ -1026,6 +1026,17 @@ training. The `pre_tokenized` training config must name the same template, since
 training saves the tokenizer with it; a different one is refused with
 `cache hash mismatch`. A cache written before the template joined the key is
 refused the same way: re-run `soup data preprocess` to rebuild it.
+
+Cached rows carry a `labels` column masked exactly as the equivalent live run
+would mask it (`data.train_on_responses_only` /
+`data.train_on_messages_with_train_field`, plus `data.mask_history` and
+`training.train_on_eot`). That mask mode is part of the cache key too, so a cache
+built under one masking setting is refused — with the same
+`cache hash mismatch` error — when loaded under a different one. Caches written
+before this fix (tokenizer schema `v5` and earlier) have no `labels` and are
+rejected; re-run `soup data preprocess`. A `pre_tokenized` dataset you built
+yourself must carry its own `labels` column (`-100` on every token not to train
+on); without one it is refused rather than trained on every token.
 
 
 ## Data Recipe DAG Runner (`soup data recipe --execute`)
