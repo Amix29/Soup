@@ -24,7 +24,7 @@ def _randomise_b(model):
                 torch.nn.init.normal_(param, std=0.2)
 
 
-def _make_model(targets, *, ranks=None, bias=True, modules_to_save=None):
+def _make_model(targets, *, ranks=None, bias=True, modules_to_save=None, dropout=0.0):
     _deps()
     import torch.nn as nn
     from peft import LoraConfig, inject_adapter_in_model
@@ -34,7 +34,6 @@ def _make_model(targets, *, ranks=None, bias=True, modules_to_save=None):
             super().__init__()
             self.q_proj = nn.Linear(8, 8, bias=bias)
             self.k_proj = nn.Linear(8, 4, bias=bias)
-
             self.v_proj = nn.Linear(8, 4, bias=bias)
 
         def forward(self, x):
@@ -53,7 +52,7 @@ def _make_model(targets, *, ranks=None, bias=True, modules_to_save=None):
         LoraConfig(
             r=2,
             lora_alpha=4,
-            lora_dropout=0.0,
+            lora_dropout=dropout,
             bias="none",
             target_modules=list(targets),
             rank_pattern=ranks or {},
@@ -281,7 +280,7 @@ class TestCoordinator:
 
         model = _make_model(("q_proj", "k_proj", "v_proj"))
         query = torch.randn(2, 3, 8, requires_grad=True)
-        memory = torch.randn(2, 5, 8, requires_grad=True)
+        memory = torch.randn(2, 3, 8, requires_grad=True)
         reference_q = model.attn.q_proj(query)
         reference_k = model.attn.k_proj(memory)
         reference_v = model.attn.v_proj(memory)
@@ -310,6 +309,19 @@ class TestCoordinator:
         assert hasattr(model.attn.k_proj, "modules_to_save")
         assert patch_fast_lora_qkv(model) == 0
 
+    def test_nonzero_dropout_delegates_to_peft(self):
+        torch = _deps()
+        from soup_cli.utils.fast_lora_qkv import patch_fast_lora_qkv
+
+        model = _make_model(("q_proj", "k_proj", "v_proj"), dropout=0.25)
+        model.train()
+        assert patch_fast_lora_qkv(model) == 1
+        output = model(torch.randn(2, 3, 8, requires_grad=True))
+        assert all(
+            type(part.grad_fn).__name__ != "_FastLoraQKVBackward"
+            for part in output
+        )
+
     def test_qkv_owns_projections_until_unpatched(self):
         torch = _deps()
         from soup_cli.utils.fast_lora import patch_fast_lora_single_projection
@@ -323,6 +335,19 @@ class TestCoordinator:
         model.attn.q_proj.forward = types.MethodType(replacement, model.attn.q_proj)
         assert unpatch_fast_lora_qkv(model) == 1
         assert model.attn.q_proj.forward.__func__ is replacement
+
+    def test_qkv_refuses_projections_already_owned_by_single_projection(self):
+        _deps()
+        from soup_cli.utils.fast_lora import (
+            patch_fast_lora_single_projection,
+            unpatch_fast_lora_single_projection,
+        )
+        from soup_cli.utils.fast_lora_qkv import patch_fast_lora_qkv
+
+        model = _make_model(("q_proj", "k_proj", "v_proj"))
+        assert patch_fast_lora_single_projection(model) == 3
+        assert patch_fast_lora_qkv(model) == 0
+        assert unpatch_fast_lora_single_projection(model) == 3
 
     def test_real_peft_8bit_layers_are_not_patched(self):
         _deps()
@@ -472,7 +497,11 @@ class TestFastPathIsActuallyTaken:
             def forward(self, x):
                 return self.attn(x)
 
-        model = Model().to("cuda")
+        torch.manual_seed(seed)
+        model = Model()
+        with torch.no_grad():
+            model.attn.v_proj.weight.mul_(4)
+        model = model.to("cuda")
         inject_adapter_in_model(
             LoraConfig(
                 r=2,
@@ -489,7 +518,6 @@ class TestFastPathIsActuallyTaken:
             for name in ("q_proj", "k_proj", "v_proj")
         )
         reference = copy.deepcopy(model)
-        torch.manual_seed(seed)
         x_ref = torch.randn(
             2, 3, 8, device="cuda", dtype=torch.bfloat16, requires_grad=True
         )
@@ -605,6 +633,12 @@ class TestStreamedModel:
         input_ids = torch.randint(0, 64, (1, 8))
         labels = torch.randint(0, 64, (1, 8))
         streamed_loss = streamed(input_ids=input_ids, labels=labels).loss
+        hits = [
+            getattr(module, "_soup_fast_lora_qkv_last_cache_hits", None)
+            for module in streamed.modules()
+            if getattr(module, "_soup_fast_lora_qkv", False)
+        ]
+        assert hits == [(2, ("_FastLoraQKVBackward",) * 3)] * 4, hits
         streamed_loss.backward()
         resident_loss = resident(input_ids=input_ids, labels=labels).loss
         resident_loss.backward()
