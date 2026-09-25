@@ -423,10 +423,12 @@ def _preserve_preference_probe_state(trainer):
     """Keep a pre-flight loss call out of training metrics and random streams."""
     import torch
 
-    missing = object()
     mutable = ("_metrics", "_stored_metrics", "_total_train_tokens")
+    present = set(vars(trainer))
     snapshots = {
-        name: copy.deepcopy(getattr(trainer, name, missing)) for name in mutable
+        name: copy.deepcopy(vars(trainer)[name])
+        for name in mutable
+        if name in present
     }
     python_rng = random.getstate()
     torch_rng = torch.random.get_rng_state()
@@ -436,12 +438,11 @@ def _preserve_preference_probe_state(trainer):
     try:
         yield
     finally:
-        for name, value in snapshots.items():
-            if value is missing:
-                if hasattr(trainer, name):
-                    delattr(trainer, name)
-            else:
-                setattr(trainer, name, value)
+        for name in mutable:
+            if name in snapshots:
+                setattr(trainer, name, snapshots[name])
+            elif name in vars(trainer):
+                delattr(trainer, name)
         random.setstate(python_rng)
         torch.random.set_rng_state(torch_rng)
         if cuda_rng is not None:
@@ -1512,6 +1513,12 @@ class StreamingSetupMixin:
         """Apply the one measured-fit policy shared by SFT and preferences."""
         from soup_cli.utils.layer_stream import decide_measured_fit
 
+        model_rows = f"{plan.rows} model row{'s' if plan.rows != 1 else ''}"
+
+        # The instrument has three distinct non-success outcomes. ``None`` means
+        # the platform could not run it and prediction remains authoritative;
+        # ``failed`` means the step raised; ``oom`` means CUDA exhausted memory.
+        # The latter two refuse because the context or fit is no longer known.
         if peak is None:
             console.print(
                 "[yellow]The measured VRAM probe could not run; falling back to "
@@ -1530,7 +1537,7 @@ class StreamingSetupMixin:
             self._close_stream_runtime()
             raise ValueError(
                 f"the measured VRAM probe raised {peak.error} while running one "
-                f"{plan.task} step at {plan.rows} model rows x seq {plan.seq_len}. The fit "
+                f"{plan.task} step at {model_rows} x seq {plan.seq_len}. The fit "
                 "could not be established and the CUDA context may no longer be usable, so "
                 f"this run is refused rather than continued on the predicted budget "
                 f"({plan.predicted_bytes / 1e9:.2f} GB). Re-run without "
@@ -1539,7 +1546,7 @@ class StreamingSetupMixin:
         if peak.oom:
             self._close_stream_runtime()
             raise ValueError(
-                f"a {plan.task} streaming step at {plan.rows} model rows x seq "
+                f"one {plan.task} streaming step at {model_rows} x seq "
                 f"{plan.seq_len} ran out of VRAM while being measured (predicted "
                 f"{plan.predicted_bytes / 1e9:.2f} GB, {plan.available_bytes / 1e9:.2f} GB "
                 "free). Lower training.batch_size or data.max_length."
@@ -1552,7 +1559,7 @@ class StreamingSetupMixin:
         console.print(
             f"[dim]measured {plan.task} peak {peak.peak_bytes / 1e9:.2f} GB "
             f"({peak.reserved_bytes / 1e9:.2f} GB reserved) in {peak.seconds:.2f} s at "
-            f"batch {plan.batch_size} ({plan.rows} model rows) x seq {plan.seq_len}; "
+            f"batch {plan.batch_size} ({model_rows}) x seq {plan.seq_len}; "
             f"predicted {plan.predicted_bytes / 1e9:.2f} GB[/]"
         )
         if not fit.fits:
