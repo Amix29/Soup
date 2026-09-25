@@ -154,6 +154,66 @@ def test_production_capability_gate_keeps_cpu_on_the_old_path():
     assert _can_use_checkpoint_visible_nf4_gemm(torch.randn(2, 16), state) is False
 
 
+def test_bitsandbytes_private_dispatch_contract_is_visible_to_cpu_ci():
+    try:
+        from bitsandbytes.backends.cuda import ops as bnb_cuda_ops
+    except (ImportError, AttributeError) as exc:
+        pytest.skip(f"bitsandbytes CUDA ops cannot import with this torch build: {exc}")
+
+    assert hasattr(bnb_cuda_ops, "_gemm_4bit_use_custom_fn")
+    assert hasattr(bnb_cuda_ops, "_gemm_4bit_custom_max_m")
+
+
+@pytest.mark.parametrize(
+    ("m", "k", "dispatch", "expected"),
+    [
+        (3, 64, True, True),
+        (3, 64, False, False),
+        (97, 64, True, False),
+        (3, 65, True, False),
+    ],
+    ids=["fused", "bnb-dequant", "above-m-cap", "misaligned-k"],
+)
+def test_cuda_route_follows_bitsandbytes_shape_decision_on_cpu(
+    monkeypatch, m, k, dispatch, expected
+):
+    from types import SimpleNamespace
+
+    import bitsandbytes.backends.cuda as bnb_cuda_package
+
+    from soup_cli.utils.layer_stream_runtime import _can_use_checkpoint_visible_nf4_gemm
+
+    calls = []
+
+    def use_custom_fn(device_index, dtype, rows, out_features, in_features):
+        calls.append((device_index, dtype, rows, out_features, in_features))
+        return dispatch
+
+    fake_ops = SimpleNamespace(
+        _gemm_4bit_custom_max_m=96,
+        _gemm_4bit_use_custom_fn=use_custom_fn,
+    )
+    monkeypatch.setitem(sys.modules, "bitsandbytes.backends.cuda.ops", fake_ops)
+    monkeypatch.setattr(bnb_cuda_package, "ops", fake_ops, raising=False)
+    x = SimpleNamespace(
+        device=SimpleNamespace(type="cuda", index=0),
+        dtype=torch.bfloat16,
+        shape=(m, k),
+        numel=lambda: m * k,
+    )
+    state = SimpleNamespace(
+        nested=False,
+        shape=(128, k),
+        blocksize=64,
+    )
+
+    assert _can_use_checkpoint_visible_nf4_gemm(x, state) is expected
+    if m <= 96 and k % 64 == 0:
+        assert calls == [(0, torch.bfloat16, m, 128, k)]
+    else:
+        assert calls == []
+
+
 def test_backward_refuses_a_recycled_stream_slot():
     torch.manual_seed(31)
     packed, state = bnb_functional.quantize_4bit(
@@ -312,13 +372,9 @@ def test_fused_cuda_recycling_matches_private_buffer_and_plain_ctx_fails():
 
 
 @pytest.mark.gpu
-@pytest.mark.parametrize(
-    ("seq_len", "expects_function"),
-    [(8, True), (128, False)],
-    ids=["fused-m", "training-m"],
-)
+@pytest.mark.parametrize("seq_len", [8, 128], ids=["fused-m", "training-m"])
 def test_streamed_matches_unpatched_resident_logits_and_all_lora_grads(
-    tmp_path, monkeypatch, seq_len, expects_function
+    tmp_path, monkeypatch, seq_len
 ):
     import bitsandbytes as bnb
     from test_v07202 import (
@@ -341,6 +397,8 @@ def test_streamed_matches_unpatched_resident_logits_and_all_lora_grads(
     phase = {"name": "streamed"}
     real_function = runtime_module.checkpoint_visible_nf4_linear
     real_matmul = bnb.matmul_4bit
+    real_gate = runtime_module._can_use_checkpoint_visible_nf4_gemm
+    gate_decisions = []
 
     def counting_function(*args, **kwargs):
         calls["function"] += 1
@@ -350,8 +408,16 @@ def test_streamed_matches_unpatched_resident_logits_and_all_lora_grads(
         calls[phase["name"] + "_matmul"] += 1
         return real_matmul(*args, **kwargs)
 
+    def recording_gate(*args, **kwargs):
+        decision = real_gate(*args, **kwargs)
+        gate_decisions.append(decision)
+        return decision
+
     monkeypatch.setattr(
         runtime_module, "checkpoint_visible_nf4_linear", counting_function
+    )
+    monkeypatch.setattr(
+        runtime_module, "_can_use_checkpoint_visible_nf4_gemm", recording_gate
     )
     monkeypatch.setattr(bnb, "matmul_4bit", counting_matmul)
 
@@ -367,7 +433,8 @@ def test_streamed_matches_unpatched_resident_logits_and_all_lora_grads(
 
     assert calls["streamed_matmul"] == 0
     assert calls["resident_matmul"] > 0
-    assert (calls["function"] > 0) is expects_function
+    assert gate_decisions
+    assert (calls["function"] > 0) is any(gate_decisions)
     assert torch.equal(streamed_logits, resident_logits)
 
     def adapter_grads(model):
