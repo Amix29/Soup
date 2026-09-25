@@ -46,6 +46,33 @@ def _emit_args(output):
     ]
 
 
+def _write_verify_pair(tmp_path):
+    statement = {
+        "_type": "https://in-toto.io/Statement/v1",
+        "subject": [{"name": "x", "digest": {"sha256": "a" * 64}}],
+        "predicateType": "https://slsa.dev/provenance/v1",
+        "predicate": {},
+    }
+    statement_path = tmp_path / "att.json"
+    statement_path.write_text(
+        json.dumps(statement, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    sidecar_path = tmp_path / "att.json.sig"
+    sidecar_path.write_text(
+        json.dumps(
+            {
+                "backend": "sigstore",
+                "signature": "",
+                "public_key": "",
+                "sigstore_bundle": '{"bundle":"ok"}',
+            }
+        ),
+        encoding="utf-8",
+    )
+    return statement_path, sidecar_path
+
+
 class TestAttestationSigstoreBackend:
     def test_sign_returns_portable_bundle(self, monkeypatch):
         from soup_cli.utils.attest import sign_attestation
@@ -132,38 +159,11 @@ class TestAttestSigstoreCli:
         assert not output.exists()
         assert not (tmp_path / "attestation.json.sig").exists()
 
-    def _write_verify_pair(self, tmp_path):
-        statement = {
-            "_type": "https://in-toto.io/Statement/v1",
-            "subject": [{"name": "x", "digest": {"sha256": "a" * 64}}],
-            "predicateType": "https://slsa.dev/provenance/v1",
-            "predicate": {},
-        }
-        statement_path = tmp_path / "att.json"
-        statement_path.write_text(
-            json.dumps(statement, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-        sidecar_path = tmp_path / "att.json.sig"
-        sidecar_path.write_text(
-            json.dumps(
-                {
-                    "backend": "sigstore",
-                    "signature": "",
-                    "public_key": "",
-                    "sigstore_bundle": '{"bundle":"ok"}',
-                }
-            ),
-            encoding="utf-8",
-        )
-        return statement_path, sidecar_path
-
-
     def test_verify_requires_out_of_band_identity(self, tmp_path, monkeypatch):
         from soup_cli.commands.attest import app
 
         monkeypatch.chdir(tmp_path)
-        statement, sidecar = self._write_verify_pair(tmp_path)
+        statement, sidecar = _write_verify_pair(tmp_path)
         result = CliRunner().invoke(
             app,
             ["verify", str(statement), "--signature", str(sidecar)],
@@ -176,7 +176,7 @@ class TestAttestSigstoreCli:
         from soup_cli.commands.attest import app
 
         monkeypatch.chdir(tmp_path)
-        statement, sidecar = self._write_verify_pair(tmp_path)
+        statement, sidecar = _write_verify_pair(tmp_path)
         result = CliRunner().invoke(
             app,
             [
@@ -195,7 +195,7 @@ class TestAttestSigstoreCli:
         from soup_cli.commands.attest import app
 
         monkeypatch.chdir(tmp_path)
-        statement, sidecar = self._write_verify_pair(tmp_path)
+        statement, sidecar = _write_verify_pair(tmp_path)
         result = CliRunner().invoke(
             app,
             [
@@ -214,7 +214,7 @@ class TestAttestSigstoreCli:
         import soup_cli.commands.attest as attest_cmd
 
         monkeypatch.chdir(tmp_path)
-        statement, sidecar = self._write_verify_pair(tmp_path)
+        statement, sidecar = _write_verify_pair(tmp_path)
         seen = {}
 
         def verify(payload, bundle, *, identity, issuer=None):
@@ -251,7 +251,7 @@ class TestAttestSigstoreCli:
         import soup_cli.commands.attest as attest_cmd
 
         monkeypatch.chdir(tmp_path)
-        statement, sidecar = self._write_verify_pair(tmp_path)
+        statement, sidecar = _write_verify_pair(tmp_path)
 
         def reject(*args, **kwargs):
             raise ValueError("certificate identity mismatch")
@@ -280,7 +280,7 @@ class TestAttestSigstoreCli:
         import soup_cli.commands.attest as attest_cmd
 
         monkeypatch.chdir(tmp_path)
-        statement, sidecar = self._write_verify_pair(tmp_path)
+        statement, sidecar = _write_verify_pair(tmp_path)
         monkeypatch.setattr(attest_cmd, "_MAX_SIGNATURE_SIDECAR_BYTES", 8)
         result = CliRunner().invoke(
             attest_cmd.app,
@@ -424,6 +424,90 @@ class TestAttestSigstoreReviewFollowups:
         assert not output.exists()
         assert not (tmp_path / "att.json.sig").exists()
 
+    def test_sigstore_with_key_refuses_before_signing(self, tmp_path, monkeypatch):
+        from soup_cli.commands.attest import app
+
+        monkeypatch.chdir(tmp_path)
+        seen = _patch_signer(monkeypatch)
+        output = tmp_path / "att.json"
+        result = CliRunner().invoke(
+            app,
+            _emit_args(output) + ["--key", "signing.pem"],
+        )
+
+        assert result.exit_code == 2, result.output
+        assert "payload" not in seen
+        assert not output.exists()
+
+    def test_public_key_is_refused_on_a_sigstore_record(self, tmp_path, monkeypatch):
+        import soup_cli.commands.attest as attest_cmd
+
+        monkeypatch.chdir(tmp_path)
+        statement, sidecar = _write_verify_pair(tmp_path)
+        (tmp_path / "trusted.pub").write_text("unused", encoding="utf-8")
+        called = {"verify": False}
+
+        def verify(*args, **kwargs):
+            called["verify"] = True
+            return True
+
+        monkeypatch.setattr(attest_cmd, "verify_sigstore_attestation", verify)
+        result = CliRunner().invoke(
+            attest_cmd.app,
+            [
+                "verify",
+                str(statement),
+                "--signature",
+                str(sidecar),
+                "--public-key",
+                "trusted.pub",
+                "--cert-identity",
+                "trusted@example.com",
+                "--cert-oidc-issuer",
+                "https://issuer.example",
+            ],
+        )
+
+        assert result.exit_code == 2, result.output
+        assert called["verify"] is False
+
+    def test_verify_hands_the_verifier_the_bytes_emit_signed(self, tmp_path, monkeypatch):
+        import soup_cli.commands.attest as attest_cmd
+
+        monkeypatch.chdir(tmp_path)
+        signed = _patch_signer(monkeypatch)
+        output = tmp_path / "att.json"
+        emitted = CliRunner().invoke(attest_cmd.app, _emit_args(output))
+        assert emitted.exit_code == 0, emitted.output
+
+        document = json.loads(output.read_text(encoding="utf-8"))
+        output.write_bytes(
+            (json.dumps(document, separators=(",", ":")) + "\r\n").encode("utf-8")
+        )
+        verified = {}
+
+        def verify(payload, bundle, *, identity, issuer):
+            verified["payload"] = payload
+            return True
+
+        monkeypatch.setattr(attest_cmd, "verify_sigstore_attestation", verify)
+        result = CliRunner().invoke(
+            attest_cmd.app,
+            [
+                "verify",
+                str(output),
+                "--signature",
+                f"{output}.sig",
+                "--cert-identity",
+                "trusted@example.com",
+                "--cert-oidc-issuer",
+                "https://issuer.example",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert verified["payload"] == signed["payload"]
+
     def test_ed25519_sidecar_omits_empty_sigstore_field(self, tmp_path, monkeypatch):
         from soup_cli.commands.attest import app
         from soup_cli.utils.signing import generate_ed25519_private_pem
@@ -516,7 +600,7 @@ class TestAttestSigstoreReviewFollowups:
         import soup_cli.commands.attest as attest_cmd
 
         monkeypatch.chdir(tmp_path)
-        statement, sidecar = TestAttestSigstoreCli()._write_verify_pair(tmp_path)
+        statement, sidecar = _write_verify_pair(tmp_path)
         attack = "\x1b]0;SPOOFED-TITLE\x07\x1b[2J\x1b[H\x1b[32mValid: True\x1b[0m"
 
         def reject(*args, **kwargs):
@@ -549,7 +633,7 @@ class TestAttestSigstoreReviewFollowups:
         import soup_cli.commands.attest as attest_cmd
 
         monkeypatch.chdir(tmp_path)
-        statement, sidecar = TestAttestSigstoreCli()._write_verify_pair(tmp_path)
+        statement, sidecar = _write_verify_pair(tmp_path)
         real_import = builtins.__import__
 
         def force_missing_sigstore(name, *args, **kwargs):
@@ -609,7 +693,7 @@ def test_verifier_production_failure_is_unavailable_not_invalid(tmp_path, monkey
     import soup_cli.commands.attest as attest_cmd
 
     monkeypatch.chdir(tmp_path)
-    statement, sidecar = TestAttestSigstoreCli()._write_verify_pair(tmp_path)
+    statement, sidecar = _write_verify_pair(tmp_path)
     models = ModuleType("sigstore.models")
     verify_mod = ModuleType("sigstore.verify")
     policy_mod = ModuleType("sigstore.verify.policy")
@@ -627,7 +711,9 @@ def test_verifier_production_failure_is_unavailable_not_invalid(tmp_path, monkey
     class Verifier:
         @classmethod
         def production(cls):
-            raise RuntimeError("TUF metadata unavailable")
+            raise RuntimeError(
+                "TUF metadata unavailable\x1b]0;SPOOFED-TITLE\x07\x1b[2J"
+            )
 
     models.Bundle = Bundle
     verify_mod.Verifier = Verifier
@@ -649,6 +735,8 @@ def test_verifier_production_failure_is_unavailable_not_invalid(tmp_path, monkey
     flattened = " ".join(out.split())
     assert "verification unavailable" in flattened.lower()
     assert "TUF metadata unavailable" in flattened
+    assert "\x1b" not in out
+    assert "\x07" not in out
 
 
 def test_emit_write_oserror_is_usage_failure(tmp_path, monkeypatch):
