@@ -167,10 +167,16 @@ def _projection_state(
         else:
             if adapter in getattr(proj, "lora_variant", {}):
                 return None
+            # Dropout changes the adapter computation and mask lifetime; the
+            # hand-written kernels model only the deterministic LoRA branch.
             if float(getattr(proj.lora_dropout[adapter], "p", 0.0)) != 0.0:
                 return None
+            # Conv1D-style/transposed storage needs the PEFT fan-in/fan-out
+            # path rather than the Linear weight orientation used below.
             if getattr(proj, "fan_in_fan_out", False):
                 return None
+            # ``lora_bias`` adds another trained term that these Functions do
+            # not accept or differentiate.
             if getattr(proj.lora_B[adapter], "bias", None) is not None:
                 return None
 
@@ -185,6 +191,11 @@ def _projection_state(
         except AttributeError:
             pass
         qstate = getattr(weight, "quant_state", None) or base.quant_state
+
+    # An unadapted sibling may still be an 8-bit/custom projection. Without a
+    # 4-bit QuantState it is not a dense floating weight and cannot use F.linear.
+    if qstate is None and not weight.is_floating_point():
+        return None
 
     compute_dtype = None
     qmeta = None
