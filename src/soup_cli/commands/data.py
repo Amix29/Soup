@@ -2500,6 +2500,7 @@ def preprocess_dataset(
         format_name=cfg.data.format,
         chat_template=chat_template,
         mask_mode=mask_mode,
+        task=cfg.task,
     )
     target = Path(out_real) / cache_key
     console.print(f"[cyan]Dataset:[/] {train_display}")

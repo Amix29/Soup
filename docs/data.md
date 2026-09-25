@@ -1031,7 +1031,7 @@ Pass `--live --base-yaml soup.yaml` to score each candidate with a short `soup t
 ## AOT Tokenization with `soup data preprocess`
 
 Pre-tokenize your dataset once and cache Arrow shards keyed by
-`(dataset, tokenizer, max_length, format, chat_template, loss-mask mode)`:
+`(dataset, tokenizer, max_length, format, chat_template, loss-mask mode, task)`:
 
 ```bash
 soup data preprocess soup.yaml --output ./tokenized_cache
@@ -1080,6 +1080,26 @@ rather than trained on every token. `task: pretrain` has no such check: a
 dataset without `labels` trains on every token, because TRL's collator copies
 `input_ids` into `labels`. That is the pretraining objective, and a
 `soup data preprocess` cache built for `task: pretrain` records the same labels.
+
+The full key, as `PREPROCESS_KEY_FIELDS` in `soup_cli/utils/data_pipeline.py`
+declares it:
+
+| Key input | Config fields |
+|---|---|
+| dataset | `data.train`, `data.interleave`, `data.val_split`, `data.replay`, `data.replay_ratio`, `data.replay_seed`, `data.streaming`, `data.buffer_size`, `data.image_dir`, `data.audio_dir` |
+| tokenizer | `base` |
+| max_length | `data.max_length` |
+| format | `data.format` (the source format preprocess read, recorded in `metadata.json`) |
+| chat_template | `data.chat_template`, resolved to the Jinja it renders |
+| loss-mask mode | `data.train_on_responses_only`, `data.train_on_messages_with_train_field`, `data.mask_history`, `training.train_on_eot` |
+| task | `task` |
+
+The dataset input covers every setting that decides which rows are cached: only
+the train split is cached, replay rows are mixed into it first, and the streaming
+loaders choose rows and their order. Every other `data` field is listed in
+`NOT_PREPROCESS_KEY_FIELDS` with the reason it cannot change a cached row, and a
+new field must be added to one of the two tables. Caches written before this
+(tokenizer schema `v6` and earlier) are refused; re-run `soup data preprocess`.
 
 
 ## Data Recipe DAG Runner (`soup data recipe --execute`)
