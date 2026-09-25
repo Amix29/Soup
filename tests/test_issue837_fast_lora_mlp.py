@@ -351,12 +351,101 @@ class TestFastPathAndScope:
         assert output.dtype == reference.dtype
         assert type(output.grad_fn).__name__ == "_FastLoraSwiGLUBackward"
 
+    def test_single_projection_keeps_pefts_bfloat16_output_under_cpu_autocast(self):
+        torch = _deps()
+        import torch.nn as nn
+        from peft import LoraConfig, inject_adapter_in_model
+
+        from soup_cli.utils.fast_lora import patch_fast_lora_single_projection
+
+        class Model(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.o_proj = nn.Linear(8, 8)
+
+        torch.manual_seed(0)
+        model = Model()
+        inject_adapter_in_model(
+            LoraConfig(
+                r=2,
+                lora_alpha=4,
+                lora_dropout=0.0,
+                target_modules=["o_proj"],
+            ),
+            model,
+        )
+        x = torch.randn(2, 5, 8, requires_grad=True)
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            reference = model.o_proj(x)
+        assert reference.dtype == torch.bfloat16
+
+        assert patch_fast_lora_single_projection(model) == 1
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            output = model.o_proj(x)
+
+        assert output.dtype == reference.dtype
+        assert type(output.grad_fn).__name__ == "_FastLoraSingleProjectionBackward"
+
     def test_module_gelu_is_refused_even_when_parent_config_says_silu(self):
         _deps()
         from soup_cli.utils.fast_lora_mlp import patch_fast_lora_mlp
 
         model = _make_model(("gate_proj",), act="silu", module_act="gelu")
         assert patch_fast_lora_mlp(model) == 0
+
+    def test_missing_module_activation_fails_closed(self):
+        _deps()
+        from soup_cli.utils.fast_lora_mlp import patch_fast_lora_mlp
+
+        model = _make_model(("gate_proj",), act="silu")
+        del model.mlp.act_fn
+        assert patch_fast_lora_mlp(model) == 0
+
+    def test_unadapted_int8_sibling_refuses_the_whole_mlp(self):
+        torch = _deps()
+        bnb = pytest.importorskip("bitsandbytes")
+        import torch.nn as nn
+        from peft import LoraConfig, inject_adapter_in_model
+
+        from soup_cli.utils.fast_lora_mlp import patch_fast_lora_mlp
+
+        class TinyMLP(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.gate_proj = nn.Linear(8, 12)
+                self.up_proj = bnb.nn.Linear8bitLt(8, 12, has_fp16_weights=False)
+                self.down_proj = bnb.nn.Linear8bitLt(12, 8, has_fp16_weights=False)
+                self.act_fn = nn.SiLU()
+
+            def forward(self, x):
+                return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+
+        class Model(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.config = SimpleNamespace(hidden_act="silu")
+                self.mlp = TinyMLP()
+
+            def forward(self, x):
+                return self.mlp(x)
+
+        model = Model().to("cpu")
+        inject_adapter_in_model(
+            LoraConfig(
+                r=2,
+                lora_alpha=4,
+                lora_dropout=0.0,
+                target_modules=["gate_proj"],
+            ),
+            model,
+        )
+        x = torch.randn(2, 3, 8, requires_grad=True)
+        reference = model(x)
+        assert not model.mlp.up_proj.weight.is_floating_point()
+        assert patch_fast_lora_mlp(model) == 1
+        output = model(x)
+        assert type(output.grad_fn).__name__ != "_FastLoraSwiGLUBackward"
+        torch.testing.assert_close(output, reference)
 
     def test_moe_expert_path_is_out_of_scope(self):
         _deps()
@@ -432,7 +521,10 @@ class TestFastPathAndScope:
                 return self.mlp(x)
 
         torch.manual_seed(seed)
-        model = Model().to("cuda")
+        model = Model()
+        with torch.no_grad():
+            model.mlp.up_proj.weight.mul_(4)
+        model = model.to("cuda")
         inject_adapter_in_model(
             LoraConfig(
                 r=2,
@@ -457,19 +549,67 @@ class TestFastPathAndScope:
         reference_x_grad = x_ref.grad.detach().clone()
         reference_grads = _adapter_grads(reference_model)
 
+        oracle_x = x_ref.detach().double().requires_grad_(True)
+        oracle_adapters = {}
+
+        def oracle_projection(layer, value, projection_name):
+            base = layer.get_base_layer()
+            dense = bnb.functional.dequantize_4bit(
+                base.weight, base.weight.quant_state
+            ).double()
+            adapter = layer.active_adapters[0]
+            lora_a = layer.lora_A[adapter].weight.detach().double().requires_grad_(True)
+            lora_b = layer.lora_B[adapter].weight.detach().double().requires_grad_(True)
+            oracle_adapters[
+                f"mlp.{projection_name}.lora_A.{adapter}.weight"
+            ] = lora_a
+            oracle_adapters[
+                f"mlp.{projection_name}.lora_B.{adapter}.weight"
+            ] = lora_b
+            base_out = torch.nn.functional.linear(value, dense)
+            lora_out = torch.nn.functional.linear(
+                torch.nn.functional.linear(value, lora_a), lora_b
+            )
+            return base_out + lora_out * float(layer.scaling[adapter])
+
+        oracle_gate = oracle_projection(
+            reference_model.mlp.gate_proj, oracle_x, "gate_proj"
+        )
+        oracle_up = oracle_projection(reference_model.mlp.up_proj, oracle_x, "up_proj")
+        oracle_hidden = torch.nn.functional.silu(oracle_gate) * oracle_up
+        oracle = oracle_projection(
+            reference_model.mlp.down_proj, oracle_hidden, "down_proj"
+        )
+        oracle.square().mean().backward()
+        oracle_x_grad = oracle_x.grad.detach()
+        oracle_grads = {
+            name: parameter.grad.detach()
+            for name, parameter in oracle_adapters.items()
+        }
+
         x = x_ref.detach().clone().requires_grad_(True)
         assert patch_fast_lora_mlp(model) == 1
         out = model(x)
         assert type(out.grad_fn).__name__ == "_FastLoraSwiGLUBackward"
         out.float().square().mean().backward()
 
-        torch.testing.assert_close(out, reference, rtol=1e-2, atol=1e-2)
-        torch.testing.assert_close(x.grad, reference_x_grad, rtol=1e-2, atol=1e-2)
+        def assert_within_twice_peft_error(actual, peft_value, oracle_value, name):
+            actual_error = (actual.double() - oracle_value).abs().max().item()
+            peft_error = (peft_value.double() - oracle_value).abs().max().item()
+            assert actual_error <= 2.0 * peft_error + 1e-8, (
+                f"{name}: kernel error {actual_error:.6g} exceeds twice "
+                f"peft error {peft_error:.6g}"
+            )
+
+        assert_within_twice_peft_error(out, reference, oracle.detach(), "output")
+        assert_within_twice_peft_error(
+            x.grad, reference_x_grad, oracle_x_grad, "input gradient"
+        )
         got_grads = _adapter_grads(model)
         assert got_grads.keys() == reference_grads.keys()
         for name, grad in got_grads.items():
-            torch.testing.assert_close(
-                grad, reference_grads[name], rtol=1e-2, atol=1e-2, msg=name
+            assert_within_twice_peft_error(
+                grad, reference_grads[name], oracle_grads[name], name
             )
 
 
@@ -561,7 +701,18 @@ class TestStreamedModel:
 
         input_ids = torch.randint(0, 64, (1, 8))
         labels = torch.randint(0, 64, (1, 8))
+        seen = []
+        hooks = [
+            module.register_forward_hook(
+                lambda _module, _inputs, output: seen.append(type(output.grad_fn).__name__)
+            )
+            for module in streamed.modules()
+            if getattr(module, "_soup_fast_lora_mlp", False)
+        ]
         streamed_loss = streamed(input_ids=input_ids, labels=labels).loss
+        for hook in hooks:
+            hook.remove()
+        assert seen == ["_FastLoraSwiGLUBackward"] * 4, seen
         streamed_loss.backward()
         resident_loss = resident(input_ids=input_ids, labels=labels).loss
         resident_loss.backward()
