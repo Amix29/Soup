@@ -1590,20 +1590,24 @@ DDP / grad-accum safety: multi-rank launches must wire an `all_reduce` hook on p
 
 ## TTS Fine-Tuning (`task='tts'`, BETA, live in v0.71.20)
 
-Live as of v0.71.20 (lifted from the v0.52.0 schema stub). The five families
-(`orpheus`, `sesame_csm`, `llasa`, `spark`, `oute`) are all decoder language
-models, so a TTS fine-tune is **next-token cross-entropy over interleaved
-`[text][audio-codec-token]` chat sequences** — the same objective the SFT
-trainer already runs. `TTSTrainerWrapper` reuses the SFT model/tokenizer/LoRA/CE
-machinery and adds two TTS-specific pieces: per-family emotion-control
-templating and registration of operator-supplied codec special tokens.
+Live as of v0.71.20 (lifted from the v0.52.0 schema stub). The codec-string
+families (`orpheus`, `llasa`, `spark`, `oute`) train with **next-token
+cross-entropy over interleaved `[text][audio-codec-token]` chat sequences**,
+so `TTSTrainerWrapper` reuses the SFT model/tokenizer/LoRA/CE machinery and
+adds per-family emotion templating plus codec-token registration. `sesame_csm`
+is different: current CSM training uses text plus 32 Mimi codebooks as parallel
+multimodal frames. Soup therefore refuses CSM on this text-SFT codec-string
+path rather than silently training the wrong objective; a dedicated CSM trainer
+is still required.
 
 There are two workflows:
 
-**Pre-encoded chat (live, validated).** Run the family's audio codec **offline**
-so the assistant turn already contains the discrete codec-token string, then
-train with `data.format: chat`. This is plain cross-entropy and runs on any GPU
-(validated end-to-end on SmolLM2-135M-Instruct).
+**Pre-encoded chat (live for codec-string families).** Run the family's audio
+codec **offline** so the assistant turn already contains the discrete
+codec-token string, then train with `data.format: chatml`. This is plain
+cross-entropy and runs on any GPU (validated end-to-end on
+SmolLM2-135M-Instruct). This workflow does not turn Sesame CSM's parallel Mimi
+codebooks into a valid CSM training example.
 
 ```yaml
 base: HuggingFaceTB/SmolLM2-135M-Instruct   # or canopylabs/orpheus-3b-0.1-ft
@@ -1611,12 +1615,14 @@ task: tts
 modality: audio_out
 data:
   train: ./data/tts_pre_encoded.jsonl   # assistant turns carry codec tokens
-  format: chat
+  format: chatml
   new_special_tokens: ["<|codec_0|>", "<|codec_1|>"]   # your codec vocab
 training:
   tts_family: orpheus
   tts_emotion: neutral   # Orpheus + Oute only
-  lora: true
+  lora:
+    r: 16
+    alpha: 32
 ```
 
 Operator-supplied `data.new_special_tokens` are registered (deduplicated, only
@@ -1628,17 +1634,20 @@ laugh; Oute: neutral / happy / sad / angry / calm / excited) — the wrapper
 prepends the family's emotion control string to the first user turn.
 
 **Live-codec (hardware/dependency-gated).** Setting `data.format: audio` asks
-the trainer to encode raw audio into codec tokens **at train time**, which needs
-the family's heavyweight codec package (`snac` for Orpheus, `moshi` for
-Sesame-CSM, `xcodec2` for Llasa, `sparktts` for Spark, `outetts` for Oute). The
-**Orpheus** path is live — install `pip install snac` and a 24 kHz mono wav is
-encoded to SNAC codec tokens end-to-end (audio is duration- and byte-capped and
-read through an `O_NOFOLLOW` fd). The other four families still surface a
-friendly per-family `RuntimeError` naming the required `pip install` and are not
-yet validated on the maintainer's box — use the pre-encoded workflow above for a
-runnable fine-tune with those.
+the trainer to encode raw audio **at train time**. Orpheus and Llasa are live on
+the codec-string path: Orpheus uses `pip install snac` at 24 kHz; Llasa uses
+Soup's `[audio]` extra (torchaudio + soundfile). Torchaudio must match the
+installed Torch release — recent torchaudio metadata may not make pip enforce
+that pairing — then Soup resamples to 16 kHz and calls the
+Transformers-native `HKUSTAudio/xcodec2-hf` codec, and
+renders the resulting ids as `<|s_ID|>` between Llasa's speech-generation
+boundary tokens. Audio remains duration/byte-capped and is read through an
+`O_NOFOLLOW` fd. Spark and Oute remain dependency-gated pending their #265
+slice. Sesame CSM fails earlier with an architecture-specific message because
+its 32 parallel Mimi codebooks require a native multimodal trainer, not a
+codec-string adapter.
 
-Five ready-made recipes ship: `orpheus-tts-sft`, `sesame-csm-tts`, `llasa-tts`,
+Four ready-made codec-string recipes ship: `orpheus-tts-sft`, `llasa-tts`,
 `spark-tts`, `oute-tts` — copy with `soup recipes use <name>`. Cross-validators
 reject the `mlx` backend, `modality != audio_out`, and emotion tags outside the
 per-family allowlist.
