@@ -99,7 +99,11 @@ def test_real_row_uses_shipped_variant2_and_exact_training_control(monkeypatch):
     assert row.training_packed_for_cpu is False
     assert row.training_vs_variant2_max_abs == 0.0
     assert row.variant2_max_abs > 0.0
-    assert 0.0 <= row.emulated_bf16_rel < harness.PACKED_EFFECT_REL_ENVELOPE
+    # One bf16 rounding of input, weight and output: a few 1e-3 relative, never 0.
+    assert 1e-3 < row.emulated_bf16_rel < harness.PACKED_EFFECT_REL_ENVELOPE
+    assert row.emulated_bf16_rel == pytest.approx(
+        row.emulated_bf16_vs_variant2_max_abs / row.variant2_max_abs
+    )
 
 
 def test_nf4_fixture_uses_double_quant():
@@ -395,7 +399,6 @@ def test_harness_source_has_no_model_or_dataset_download_calls():
     assert not any(token in source for token in forbidden)
 
 
-
 @pytest.mark.parametrize(
     ("scale", "expected_code"),
     [
@@ -568,7 +571,8 @@ def test_real_avx512_host_runs_default_gate_when_available(capsys):
     code = harness.main([])
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
-    print(captured.out)
+    with capsys.disabled():
+        print(captured.out)
     assert payload["has_avx512bf16"] is True
     assert payload["packed_inference_rows"] > 0
     assert code == harness.EXIT_OK

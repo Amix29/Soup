@@ -297,6 +297,7 @@ def _evaluate_rows(rows: list[Row]) -> dict:
         ),
     }
 
+
 _MISSING_KERNEL_MARKER = object()
 
 
