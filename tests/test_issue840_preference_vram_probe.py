@@ -194,12 +194,16 @@ def test_pending_probe_executes_trainer_compute_loss(monkeypatch):
             AssertionError("preference probe dispatched to the causal-LM instrument")
         ),
     )
+    trainer_attributes = set(vars(wrapper.trainer))
+    wrapper.model.eval()
     rng_before = torch.random.get_rng_state()
     wrapper._run_pending_stream_vram_probe()
     assert wrapper.trainer.seen == torch.Size([2, 8])
     assert wrapper.trainer._metrics == {"train": {"loss": [1.0]}}
     assert wrapper.trainer._total_train_tokens == 7
     assert torch.equal(torch.random.get_rng_state(), rng_before)
+    assert set(vars(wrapper.trainer)) == trainer_attributes
+    assert wrapper.model.training is False
     assert wrapper._pending_stream_vram_probe is None
     assert wrapper._stream_runtime.closed == 0
 
@@ -255,6 +259,7 @@ def test_batch_build_failure_closes_the_stream_runtime(batch, message):
 def test_loss_instrument_uses_allocated_peak_runs_backward_and_clears_grads(monkeypatch):
     import torch
 
+    import soup_cli.utils.layer_stream_runtime as runtime_module
     from soup_cli.utils.layer_stream_runtime import measure_loss_step_peak_bytes
 
     calls = {"allocated": 0, "reserved": 0}
@@ -273,6 +278,16 @@ def test_loss_instrument_uses_allocated_peak_runs_backward_and_clears_grads(monk
 
     monkeypatch.setattr(torch.cuda, "max_memory_allocated", allocated)
     monkeypatch.setattr(torch.cuda, "max_memory_reserved", reserved)
+    real_zero = runtime_module._zero_probe_grads
+    saw_backward_grads = {"value": False}
+
+    def inspect_then_zero(target):
+        saw_backward_grads["value"] = any(
+            parameter.grad is not None for parameter in target.parameters()
+        )
+        real_zero(target)
+
+    monkeypatch.setattr(runtime_module, "_zero_probe_grads", inspect_then_zero)
     model = torch.nn.Linear(4, 1)
     x = torch.randn(3, 4)
     peak = measure_loss_step_peak_bytes(
@@ -286,6 +301,7 @@ def test_loss_instrument_uses_allocated_peak_runs_backward_and_clears_grads(monk
     assert peak.peak_bytes == 123
     assert peak.reserved_bytes == 999
     assert calls == {"allocated": 1, "reserved": 1}
+    assert saw_backward_grads["value"] is True
     assert all(parameter.grad is None for parameter in model.parameters())
 
 
@@ -310,8 +326,7 @@ def test_loss_instrument_classifies_non_finite_loss_as_failed(monkeypatch):
     assert peak.error == "FloatingPointError"
 
 
-@pytest.mark.gpu
-def test_probe_forward_matches_accelerate_native_amp_contract(monkeypatch):
+def test_probe_forward_matches_accelerate_native_amp_contract_on_cpu(monkeypatch):
     import torch
 
     from soup_cli.trainer.stream_setup import _trainer_forward_for_probe
@@ -319,19 +334,19 @@ def test_probe_forward_matches_accelerate_native_amp_contract(monkeypatch):
     class Model(torch.nn.Module):
         def __init__(self):
             super().__init__()
-            self.linear = torch.nn.Linear(8, 8, device="cuda")
+            self.linear = torch.nn.Linear(8, 8)
             self.autocast_states = []
             self.logits_dtypes = []
 
         def forward(self, x):
-            self.autocast_states.append(torch.is_autocast_enabled("cuda"))
+            self.autocast_states.append(torch.is_autocast_enabled("cpu"))
             logits = self.linear(x)
             self.logits_dtypes.append(logits.dtype)
             return logits
 
     monkeypatch.setattr(
         "accelerate.utils.modeling.get_mixed_precision_context_manager",
-        lambda *_args, **_kwargs: torch.autocast("cuda", dtype=torch.bfloat16),
+        lambda *_args, **_kwargs: torch.autocast("cpu", dtype=torch.bfloat16),
     )
     trainer = SimpleNamespace(
         accelerator=SimpleNamespace(native_amp=True, autocast_handler=None)
@@ -339,7 +354,7 @@ def test_probe_forward_matches_accelerate_native_amp_contract(monkeypatch):
     model = Model()
     assert "forward" not in vars(model)
     with _trainer_forward_for_probe(trainer, model):
-        output = model(torch.randn(2, 8, device="cuda"))
+        output = model(torch.randn(2, 8))
     assert model.autocast_states == [True]
     assert model.logits_dtypes == [torch.bfloat16]
     assert output.dtype == torch.float32
