@@ -791,10 +791,21 @@ the same `SFTTrainerWrapper.setup()` row builder, and `task: distill` honours it
 too, since distill builds every row that way. On `task: sft` with
 `modality: vision` or `audio` it is accepted but not applied: those rows are
 built by the vision and audio preparers, which never read it (#1156).
+
 **`backend: mlx` ignores it:** MLX SFT builds its own mask and supervises every
 assistant turn, so the same config trains the last turn on transformers and every
 turn on MLX. `soup train` says so on its "MLX backend ignores:" line, and
 `soup doctor --config` reports it.
+
+**Multimodal vision and audio ignore it:** For `modality: vision` and `modality: audio`,
+every text token is supervised. Soup's vision collator masks only padding and image
+tokens, and the audio path only padding. Assistant-only masking would have to locate the
+assistant spans after the processor expands the image or audio tokens, which neither path
+does yet. Soup declares this gap rather
+than attempting unverified label restructuring, so both `mask_history` and `train_on_responses_only`
+are unread on vision and audio modalities, every text token trains, and `soup doctor --config`
+reports them as ignored.
+
 
 **AOT preprocessing:**
 
