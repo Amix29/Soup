@@ -4692,6 +4692,56 @@ class SoupConfig(BaseModel):
         )
 
     @model_validator(mode="after")
+    def _validate_moe_lora_task(self) -> "SoupConfig":
+        """#1151 — ``moe_lora`` selects expert-FFN LoRA targets, so it is refused
+        where no trainer can act on it: ``asr`` only ever loads Whisper, which has
+        no experts, and ``moe_lora_routing`` builds no LoRA adapter at all. The
+        classifier family reads it only on its opt-in adapter path
+        (``classifier_lora: true`` with ``lora.r > 0``, as ``trainer/classifier.py``
+        decides); without it that trainer full-fine-tunes, and there is no adapter
+        for the flag to select targets for. Across tasks: every ``_setup_unsloth``
+        attaches ``utils/unsloth.py``'s fixed attention list, and SFT's vision and
+        audio setups build their adapter without the MoE step, so neither reads it
+        (found by a local CodeRabbit review of #1179). MLX stays declared-ignored in
+        ``backend_support`` instead, which ``soup doctor`` reports."""
+        if not self.training.moe_lora:
+            return self
+        tcfg = self.training
+        if self.task in ("classifier", "reranker", "cross_encoder") and not (
+            tcfg.classifier_lora and tcfg.lora.r > 0
+        ):
+            raise ValueError(
+                f"training.moe_lora is not applied by task={self.task!r} unless "
+                "training.classifier_lora is true and training.lora.r > 0: without them that "
+                "trainer full-fine-tunes and builds no adapter for the flag to select. Set "
+                "classifier_lora: true and lora.r >= 1, or remove moe_lora."
+            )
+        if self.backend == "unsloth":
+            raise ValueError(
+                "training.moe_lora is not applied on backend='unsloth': unsloth attaches "
+                "its own fixed attention targets and never reads the flag. Use backend: "
+                "transformers, or remove moe_lora."
+            )
+        if self.task == "sft" and self.modality in ("vision", "audio"):
+            raise ValueError(
+                f"training.moe_lora is not applied by task='sft' with "
+                f"modality={self.modality!r}: that setup builds its adapter without the "
+                "MoE target step. Remove moe_lora, or train with modality: text."
+            )
+        why = {
+            "asr": "that trainer loads Whisper, which has no expert layers",
+            "moe_lora_routing": "that trainer routes between existing adapters "
+            "and builds no LoRA adapter of its own",
+            "prm": "that trainer fine-tunes every base parameter and builds no LoRA adapter",
+        }.get(self.task)
+        if why is None:
+            return self
+        raise ValueError(
+            f"training.moe_lora is not applied by task={self.task!r}: {why}. "
+            "Remove moe_lora (or set it to false)."
+        )
+
+    @model_validator(mode="after")
     def _validate_peft_variant_backend_and_quantization(self) -> "SoupConfig":
         """Keep advertised PEFT variants on paths that actually implement them."""
         lcfg = self.training.lora
