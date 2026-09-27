@@ -654,9 +654,17 @@ class TestFastPathAndScope:
         assert type(out.grad_fn).__name__ == "_FastLoraSwiGLUBackward"
         out.float().square().mean().backward()
 
+        measured_ratios = []
+
         def assert_within_twice_peft_error(actual, peft_value, oracle_value, name):
             actual_error = (actual.double() - oracle_value).abs().max().item()
             peft_error = (peft_value.double() - oracle_value).abs().max().item()
+            ratio = (
+                actual_error / peft_error
+                if peft_error
+                else (float("inf") if actual_error else 0.0)
+            )
+            measured_ratios.append((name, ratio))
             assert actual_error <= 2.0 * peft_error + 1e-8, (
                 f"{name}: kernel error {actual_error:.6g} exceeds twice "
                 f"peft error {peft_error:.6g}"
@@ -672,10 +680,13 @@ class TestFastPathAndScope:
             assert_within_twice_peft_error(
                 grad, reference_grads[name], oracle_grads[name], name
             )
+        print("#837 NF4 fast/PEFT error ratios: " + repr(measured_ratios))
 
 
 @pytest.mark.parametrize("seed", range(12))
-def test_bf16_mlp_stays_within_twice_pefts_error_against_float64(seed):
+def test_bf16_mlp_stays_within_twice_pefts_error_against_float64(
+    seed, aten_half_matmuls
+):
     torch = _deps()
     import torch.nn as nn
     from peft import LoraConfig, inject_adapter_in_model
@@ -740,6 +751,9 @@ def test_bf16_mlp_stays_within_twice_pefts_error_against_float64(seed):
     fast = run(model, x0)
     for got, ref, exact in zip(fast, reference, oracle):
         assert (got - exact).abs().max() <= 2 * (ref - exact).abs().max() + 1e-8
+    assert (fast[0] - oracle[0]).abs().max() <= 1.05 * (
+        reference[0] - oracle[0]
+    ).abs().max() + 1e-8
 
 
 class TestStreamedModel:
@@ -993,8 +1007,8 @@ class TestRealLlamaAndSavedBytes:
         model = Model()
         inject_adapter_in_model(
             LoraConfig(
-                r=16,
-                lora_alpha=32,
+                r=64,
+                lora_alpha=128,
                 lora_dropout=0.0,
                 target_modules=["gate_proj", "up_proj", "down_proj"],
             ),
@@ -1002,15 +1016,24 @@ class TestRealLlamaAndSavedBytes:
         )
 
         def saved_bytes():
+            seen = set()
             total = 0
 
             def pack(tensor):
                 nonlocal total
-                total += tensor.numel() * tensor.element_size()
+                key = (
+                    tensor.untyped_storage()._cdata,
+                    tensor.storage_offset(),
+                    tuple(tensor.shape),
+                    tuple(tensor.stride()),
+                )
+                if key not in seen:
+                    seen.add(key)
+                    total += tensor.numel() * tensor.element_size()
                 return tensor
 
             x = torch.empty(
-                1, 128, 4096, device="meta", dtype=torch.bfloat16, requires_grad=True
+                1, 2048, 4096, device="meta", dtype=torch.bfloat16, requires_grad=True
             )
             with torch.autograd.graph.saved_tensors_hooks(pack, lambda tensor: tensor):
                 model(x).sum().backward()
@@ -1021,10 +1044,12 @@ class TestRealLlamaAndSavedBytes:
         assert patch_fast_lora_mlp(model) == 1
         fast_bytes = saved_bytes()
         saved = peft_bytes - fast_bytes
+        n_f = 2048 * 14336 * 2
 
         # Shape-only meta execution makes the real 8B tensor sizes inspectable
-        # without allocating the roughly 350 MiB of saved state.
-        assert saved >= 8 * 1024 * 1024
+        # without allocating the roughly 584 MiB of saved state. The fused path
+        # must eliminate at least two, but fewer than three, [N, f] tensors.
+        assert 2 * n_f <= saved < 3 * n_f
         print(
             "#837 Llama-3.1-8B saved bytes: "
             f"peft={peft_bytes} fast={fast_bytes} saved={saved}"
