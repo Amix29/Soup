@@ -641,7 +641,9 @@ class TestFastPathIsActuallyTaken:
 
 
 @pytest.mark.parametrize("seed", range(12))
-def test_bf16_qkv_stays_within_twice_pefts_error_against_float64(seed):
+def test_bf16_qkv_stays_within_twice_pefts_error_against_float64(
+    seed, aten_half_matmuls
+):
     torch = _deps()
     import torch.nn as nn
     from peft import LoraConfig, inject_adapter_in_model
