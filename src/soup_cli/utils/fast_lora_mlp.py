@@ -16,6 +16,7 @@ from soup_cli.utils.fast_lora import (
     _flatten,
     _is_supported_lora_projection,
     _projection_state,
+    _scaled_lora_add,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,12 +71,12 @@ def _mlp_function() -> Any:
                 if has_g:
                     rank = ag.shape[0]
                     hg = h_gu[..., cursor : cursor + rank]
-                    g = torch.add(g, torch.matmul(hg, bgl.t()).to(g.dtype), alpha=float(sg))
+                    g = _scaled_lora_add(g, hg, bgl, sg)
                     cursor += rank
                 if has_u:
                     rank = au.shape[0]
                     hu = h_gu[..., cursor : cursor + rank]
-                    u = torch.add(u, torch.matmul(hu, bul.t()).to(u.dtype), alpha=float(su))
+                    u = _scaled_lora_add(u, hu, bul, su)
             else:
                 h_gu = x.new_empty((*x.shape[:-1], 0))
 
@@ -85,7 +86,7 @@ def _mlp_function() -> Any:
             del dense_d
             if has_d:
                 hd = functional.linear(_as_dtype(m, ad.dtype), ad)
-                y = torch.add(y, torch.matmul(hd, bdl.t()).to(y.dtype), alpha=float(sd))
+                y = _scaled_lora_add(y, hd, bdl, sd)
 
             ctx.has_adapters = (has_g, has_u, has_d)
             ctx.gu_ranks = (ag.shape[0] if has_g else 0, au.shape[0] if has_u else 0)
@@ -129,9 +130,20 @@ def _mlp_function() -> Any:
                     torch.matmul(_as_dtype(grad_hd, grad_m.dtype), _as_dtype(ad, grad_m.dtype)),
                 )
 
-            sig = torch.sigmoid(g)
             grad_u = grad_m * silu_g
-            grad_g = grad_m * u * sig * (1 + g * (1 - sig))
+            # Match autograd's opmath rule for SiLU backward: bf16/fp16
+            # elementwise arithmetic runs in fp32 and rounds once.  Evaluating
+            # ``1 + g * (1 - sigmoid(g))`` in bf16 magnifies cancellation near
+            # the derivative's zero and can dominate the NF4 error budget.
+            opmath = torch.promote_types(g.dtype, torch.float32)
+            g_hi = g.to(opmath)
+            sig = torch.sigmoid(g_hi)
+            grad_g = (
+                grad_m.to(opmath)
+                * u.to(opmath)
+                * sig
+                * (1 + g_hi * (1 - sig))
+            ).to(g.dtype)
 
             grad_x = None
             if ctx.needs_input_grad[0]:

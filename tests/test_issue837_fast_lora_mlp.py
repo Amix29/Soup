@@ -114,6 +114,54 @@ class TestMath:
             call, (x, ag, bgl, au, bul, ad, bdl), eps=1e-6, atol=1e-5, rtol=1e-4
         )
 
+    @pytest.mark.parametrize("missing", ["gate", "up", "down"])
+    def test_float64_gradcheck_with_each_projection_unadapted(self, missing):
+        torch = _deps()
+        from soup_cli.utils.fast_lora_mlp import _mlp_function
+
+        torch.manual_seed(4)
+        x = torch.randn(3, 8, dtype=torch.float64, requires_grad=True)
+        weights = (
+            torch.randn(12, 8, dtype=torch.float64),
+            torch.randn(12, 8, dtype=torch.float64),
+            torch.randn(8, 12, dtype=torch.float64),
+        )
+        biases = (
+            torch.randn(12, dtype=torch.float64),
+            torch.randn(12, dtype=torch.float64),
+            torch.randn(8, dtype=torch.float64),
+        )
+        shapes = {
+            "gate": ((2, 8), (12, 2)),
+            "up": ((3, 8), (12, 3)),
+            "down": ((4, 12), (8, 4)),
+        }
+        active = []
+        for name in ("gate", "up", "down"):
+            if name == missing:
+                continue
+            for shape in shapes[name]:
+                active.append(torch.randn(*shape, dtype=torch.float64, requires_grad=True))
+
+        def call(x_, *adapter_values):
+            values = iter(adapter_values)
+            adapters = []
+            for name in ("gate", "up", "down"):
+                if name == missing:
+                    adapters.extend((x_.new_empty(0), x_.new_empty(0)))
+                else:
+                    adapters.extend((next(values), next(values)))
+            return _mlp_function().apply(
+                x_,
+                weights[0], biases[0], weights[1], biases[1], weights[2], biases[2],
+                *adapters,
+                1.7, 0.8, 2.1, None, None, None,
+            )
+
+        assert torch.autograd.gradcheck(
+            call, (x, *active), eps=1e-6, atol=1e-5, rtol=1e-4
+        )
+
     @pytest.mark.parametrize(
         "targets",
         [
@@ -203,6 +251,15 @@ class TestPatching:
 
         model = _make_model(("gate_proj",), act="gelu")
         assert patch_fast_lora_mlp(model) == 0
+
+    def test_parent_config_hidden_act_gate_refuses_a_silu_module(self, caplog):
+        _deps()
+        from soup_cli.utils.fast_lora_mlp import patch_fast_lora_mlp
+
+        model = _make_model(("gate_proj",), act="gelu", module_act="silu")
+        with caplog.at_level("INFO", logger="soup_cli.utils.fast_lora_mlp"):
+            assert patch_fast_lora_mlp(model) == 0
+        assert "hidden_act='gelu'" in caplog.text
 
     def test_nonzero_dropout_delegates_to_original_mlp(self):
         torch = _deps()
@@ -484,9 +541,13 @@ class TestFastPathAndScope:
         )
         assert patch_fast_lora_mlp(model) == 0
 
-    @pytest.mark.gpu
+    @pytest.mark.parametrize(
+        "device", ["cpu", pytest.param("cuda", marks=pytest.mark.gpu)]
+    )
     @pytest.mark.parametrize("seed", [3, 7, 11])
-    def test_nf4_forward_backward_and_all_adapter_grads_match_peft(self, seed):
+    def test_nf4_forward_backward_and_all_adapter_grads_match_peft(
+        self, seed, device
+    ):
         torch = _deps()
         bnb = pytest.importorskip("bitsandbytes")
         import torch.nn as nn
@@ -524,7 +585,7 @@ class TestFastPathAndScope:
         model = Model()
         with torch.no_grad():
             model.mlp.up_proj.weight.mul_(4)
-        model = model.to("cuda")
+        model = model.to(device)
         inject_adapter_in_model(
             LoraConfig(
                 r=2,
@@ -541,7 +602,7 @@ class TestFastPathAndScope:
 
         reference_model = copy.deepcopy(model)
         x_ref = torch.randn(
-            2, 3, 8, device="cuda", dtype=torch.bfloat16, requires_grad=True
+            2, 3, 8, device=device, dtype=torch.bfloat16, requires_grad=True
         )
         reference = reference_model(x_ref)
         assert type(reference.grad_fn).__name__ != "_FastLoraSwiGLUBackward"
@@ -611,6 +672,74 @@ class TestFastPathAndScope:
             assert_within_twice_peft_error(
                 grad, reference_grads[name], oracle_grads[name], name
             )
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_bf16_mlp_stays_within_twice_pefts_error_against_float64(seed):
+    torch = _deps()
+    import torch.nn as nn
+    from peft import LoraConfig, inject_adapter_in_model
+
+    from soup_cli.utils.fast_lora_mlp import patch_fast_lora_mlp
+
+    class TinyMLP(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate_proj = nn.Linear(32, 48, bias=False)
+            self.up_proj = nn.Linear(32, 48, bias=False)
+            self.down_proj = nn.Linear(48, 32, bias=False)
+            self.act_fn = nn.SiLU()
+
+        def forward(self, x):
+            return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+
+    class Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(hidden_act="silu")
+            self.mlp = TinyMLP()
+
+        def forward(self, x):
+            return self.mlp(x)
+
+    torch.manual_seed(seed)
+    model = Model()
+    with torch.no_grad():
+        model.mlp.up_proj.weight.mul_(4)
+    inject_adapter_in_model(
+        LoraConfig(
+            r=4,
+            lora_alpha=8,
+            lora_dropout=0.0,
+            target_modules=["gate_proj", "up_proj", "down_proj"],
+        ),
+        model,
+    )
+    _randomise_b(model)
+    for name, param in model.named_parameters():
+        # Soup's layout since #429: frozen base in bf16, trainable LoRA in fp32.
+        param.data = param.data.float() if "lora_" in name else param.data.to(torch.bfloat16)
+    x0 = torch.randn(2, 5, 32, dtype=torch.bfloat16)
+
+    def run(module, x):
+        x = x.clone().requires_grad_(True)
+        out = module(x)
+        out.double().square().mean().backward()
+        grads = [
+            param.grad
+            for name, param in sorted(module.named_parameters())
+            if "lora_" in name
+        ]
+        result = [tensor.detach().double().clone() for tensor in (out, x.grad, *grads)]
+        module.zero_grad(set_to_none=True)
+        return result
+
+    oracle = run(copy.deepcopy(model).double(), x0.double())
+    reference = run(model, x0)
+    assert patch_fast_lora_mlp(model) == 1
+    fast = run(model, x0)
+    for got, ref, exact in zip(fast, reference, oracle):
+        assert (got - exact).abs().max() <= 2 * (ref - exact).abs().max() + 1e-8
 
 
 class TestStreamedModel:
@@ -832,3 +961,71 @@ class TestRealLlamaAndSavedBytes:
 
         assert 0 < fast < plain
         print(f"#837 saved bytes: peft={plain} fast={fast}")
+
+    def test_saved_bytes_at_llama_31_8b_shape(self):
+        torch = _deps()
+        import torch.nn as nn
+        from peft import LoraConfig, inject_adapter_in_model
+
+        from soup_cli.utils.fast_lora_mlp import patch_fast_lora_mlp
+
+        class Llama31MLP(nn.Module):
+            def __init__(self):
+                super().__init__()
+                kwargs = {"device": "meta", "dtype": torch.bfloat16, "bias": False}
+                self.gate_proj = nn.Linear(4096, 14336, **kwargs)
+                self.up_proj = nn.Linear(4096, 14336, **kwargs)
+                self.down_proj = nn.Linear(14336, 4096, **kwargs)
+                self.act_fn = nn.SiLU()
+
+            def forward(self, x):
+                return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+
+        class Model(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.config = SimpleNamespace(hidden_act="silu")
+                self.mlp = Llama31MLP()
+
+            def forward(self, x):
+                return self.mlp(x)
+
+        model = Model()
+        inject_adapter_in_model(
+            LoraConfig(
+                r=16,
+                lora_alpha=32,
+                lora_dropout=0.0,
+                target_modules=["gate_proj", "up_proj", "down_proj"],
+            ),
+            model,
+        )
+
+        def saved_bytes():
+            total = 0
+
+            def pack(tensor):
+                nonlocal total
+                total += tensor.numel() * tensor.element_size()
+                return tensor
+
+            x = torch.empty(
+                1, 128, 4096, device="meta", dtype=torch.bfloat16, requires_grad=True
+            )
+            with torch.autograd.graph.saved_tensors_hooks(pack, lambda tensor: tensor):
+                model(x).sum().backward()
+            model.zero_grad(set_to_none=True)
+            return total
+
+        peft_bytes = saved_bytes()
+        assert patch_fast_lora_mlp(model) == 1
+        fast_bytes = saved_bytes()
+        saved = peft_bytes - fast_bytes
+
+        # Shape-only meta execution makes the real 8B tensor sizes inspectable
+        # without allocating the roughly 350 MiB of saved state.
+        assert saved >= 8 * 1024 * 1024
+        print(
+            "#837 Llama-3.1-8B saved bytes: "
+            f"peft={peft_bytes} fast={fast_bytes} saved={saved}"
+        )

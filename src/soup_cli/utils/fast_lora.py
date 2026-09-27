@@ -53,6 +53,17 @@ def _as_dtype(tensor: Any, dtype: Any) -> Any:
     return tensor if tensor.dtype == dtype else tensor.to(dtype)
 
 
+def _scaled_lora_add(out: Any, hidden: Any, lora_b: Any, scaling: float) -> Any:
+    """Add a LoRA update with PEFT's promote, add, then cast semantics."""
+    import torch
+
+    lora_term = torch.matmul(hidden, lora_b.t())
+    promoted = torch.promote_types(out.dtype, lora_term.dtype)
+    return torch.add(
+        out.to(promoted), lora_term.to(promoted), alpha=float(scaling)
+    ).to(out.dtype)
+
+
 def _flatten(tensor: Any) -> Any:
     """Collapse the leading dimensions into one, for weight-shaped gradients.
 
@@ -320,16 +331,7 @@ def _single_projection_function() -> Any:
             # this sum. matmul + add keeps one code path that also covers the
             # ``[B, S, H]`` inputs transformers hands to real projections, and
             # the add's ``alpha`` still folds the scaling into the term.
-            lora_term = torch.matmul(h, lora_b.t())
-            if out.dtype == h.dtype:
-                out = torch.add(out, lora_term, alpha=ctx.scaling)
-            else:
-                # Matches peft's promote-then-cast sum for mixed dtypes, at the
-                # cost of one temporary; the uniform case never takes this path.
-                promoted = torch.promote_types(out.dtype, h.dtype)
-                out = torch.add(out.to(promoted), lora_term.to(promoted), alpha=ctx.scaling).to(
-                    out.dtype
-                )
+            out = _scaled_lora_add(out, h, lora_b, ctx.scaling)
             return out
 
         @staticmethod
@@ -371,7 +373,6 @@ def _single_projection_function() -> Any:
 
     _FUNCTION = _FastLoraSingleProjection
     return _FUNCTION
-
 
 
 def _make_patched_forward(original_forward: Any) -> Any:
