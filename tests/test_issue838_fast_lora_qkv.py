@@ -299,6 +299,48 @@ class TestCoordinator:
         assert getattr(model.attn, "_soup_fast_lora_qkv_cache", None) is None
         assert getattr(model.attn, "_soup_fast_lora_qkv_last_cache_hits") == (0, ())
 
+    def test_cross_attention_with_a_different_key_width_is_not_patched(self):
+        torch = _deps()
+        import torch.nn as nn
+        from peft import LoraConfig, inject_adapter_in_model
+
+        from soup_cli.utils.fast_lora_qkv import patch_fast_lora_qkv
+
+        class CrossAttention(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.q_proj = nn.Linear(8, 8)
+                self.k_proj = nn.Linear(6, 8)
+                self.v_proj = nn.Linear(6, 8)
+
+            def forward(self, x, memory):
+                return self.q_proj(x), self.k_proj(memory), self.v_proj(memory)
+
+        class Model(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.attn = CrossAttention()
+
+            def forward(self, x, memory):
+                return self.attn(x, memory)
+
+        model = Model()
+        inject_adapter_in_model(
+            LoraConfig(
+                r=2,
+                lora_alpha=4,
+                lora_dropout=0.0,
+                target_modules=["q_proj", "k_proj", "v_proj"],
+            ),
+            model,
+        )
+        x = torch.randn(2, 3, 8)
+        memory = torch.randn(2, 5, 6)
+        reference = model(x, memory)
+        assert patch_fast_lora_qkv(model) == 0
+        for got, want in zip(model(x, memory), reference):
+            torch.testing.assert_close(got, want)
+
     def test_modules_to_save_projection_keeps_peft_ownership(self):
         _deps()
         from soup_cli.utils.fast_lora_qkv import patch_fast_lora_qkv
@@ -361,7 +403,9 @@ class TestCoordinator:
             def __init__(self):
                 super().__init__()
                 self.q_proj = bnb.nn.Linear8bitLt(8, 8, bias=False)
-                self.k_proj = bnb.nn.Linear8bitLt(8, 4, bias=False)
+                self.k_proj = bnb.nn.Linear8bitLt(
+                    8, 4, bias=False, has_fp16_weights=False
+                )
                 self.v_proj = bnb.nn.Linear8bitLt(8, 4, bias=False)
 
         class Model(nn.Module):
@@ -384,6 +428,56 @@ class TestCoordinator:
             for name in ("q_proj", "k_proj", "v_proj")
         )
         assert patch_fast_lora_qkv(model) == 0
+
+    def test_unadapted_int8_sibling_refuses_the_whole_qkv_fast_path(self):
+        torch = _deps()
+        bnb = pytest.importorskip("bitsandbytes")
+        import torch.nn as nn
+        from peft import LoraConfig, inject_adapter_in_model
+
+        from soup_cli.utils.fast_lora_qkv import patch_fast_lora_qkv
+
+        class Attention(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.q_proj = nn.Linear(8, 8, bias=False)
+                self.k_proj = bnb.nn.Linear8bitLt(
+                    8, 4, bias=False, has_fp16_weights=False
+                )
+                self.v_proj = nn.Linear(8, 4, bias=False)
+
+            def forward(self, x):
+                return self.q_proj(x), self.k_proj(x), self.v_proj(x)
+
+        class Model(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.attn = Attention()
+
+            def forward(self, x):
+                return self.attn(x)
+
+        model = Model().to("cpu")
+        inject_adapter_in_model(
+            LoraConfig(
+                r=2,
+                lora_alpha=4,
+                lora_dropout=0.0,
+                target_modules=["q_proj", "v_proj"],
+            ),
+            model,
+        )
+        x = torch.randn(2, 3, 8, requires_grad=True)
+        reference = model(x)
+        assert not model.attn.k_proj.weight.is_floating_point()
+        assert patch_fast_lora_qkv(model) == 1
+        output = model(x)
+        assert all(
+            type(part.grad_fn).__name__ != "_FastLoraQKVBackward"
+            for part in output
+        )
+        for got, want in zip(output, reference):
+            torch.testing.assert_close(got, want)
 
 
 class TestFastPathIsActuallyTaken:
@@ -463,9 +557,11 @@ class TestFastPathIsActuallyTaken:
             torch.testing.assert_close(actual, expected)
         assert all(type(part.grad_fn).__name__ == "_FastLoraQKVBackward" for part in got)
 
-    @pytest.mark.gpu
+    @pytest.mark.parametrize(
+        "device", ["cpu", pytest.param("cuda", marks=pytest.mark.gpu)]
+    )
     @pytest.mark.parametrize("seed", [3, 7, 11])
-    def test_nf4_qkv_forward_backward_matches_unpatched_peft(self, seed):
+    def test_nf4_qkv_forward_backward_matches_unpatched_peft(self, seed, device):
         torch = _deps()
         bnb = pytest.importorskip("bitsandbytes")
         import torch.nn as nn
@@ -501,7 +597,7 @@ class TestFastPathIsActuallyTaken:
         model = Model()
         with torch.no_grad():
             model.attn.v_proj.weight.mul_(4)
-        model = model.to("cuda")
+        model = model.to(device)
         inject_adapter_in_model(
             LoraConfig(
                 r=2,
@@ -519,7 +615,7 @@ class TestFastPathIsActuallyTaken:
         )
         reference = copy.deepcopy(model)
         x_ref = torch.randn(
-            2, 3, 8, device="cuda", dtype=torch.bfloat16, requires_grad=True
+            2, 3, 8, device=device, dtype=torch.bfloat16, requires_grad=True
         )
         expected = reference(x_ref)
         sum(part.float().square().mean() for part in expected).backward()
@@ -542,6 +638,75 @@ class TestFastPathIsActuallyTaken:
             torch.testing.assert_close(
                 grad, expected_grads[name], rtol=1e-2, atol=1e-2, msg=name
             )
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_bf16_qkv_stays_within_twice_pefts_error_against_float64(seed):
+    torch = _deps()
+    import torch.nn as nn
+    from peft import LoraConfig, inject_adapter_in_model
+
+    from soup_cli.utils.fast_lora_qkv import patch_fast_lora_qkv
+
+    class Attention(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q_proj = nn.Linear(32, 32, bias=False)
+            self.k_proj = nn.Linear(32, 16, bias=False)
+            self.v_proj = nn.Linear(32, 16, bias=False)
+
+        def forward(self, x):
+            return self.q_proj(x), self.k_proj(x), self.v_proj(x)
+
+    class Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.attn = Attention()
+
+        def forward(self, x):
+            return self.attn(x)
+
+    torch.manual_seed(seed)
+    model = Model()
+    with torch.no_grad():
+        model.attn.v_proj.weight.mul_(4)
+    inject_adapter_in_model(
+        LoraConfig(
+            r=4,
+            lora_alpha=8,
+            lora_dropout=0.0,
+            target_modules=["q_proj", "k_proj", "v_proj"],
+        ),
+        model,
+    )
+    _randomise_b(model)
+    for name, param in model.named_parameters():
+        # Soup's layout since #429: frozen base in bf16, trainable LoRA in fp32.
+        param.data = param.data.float() if "lora_" in name else param.data.to(torch.bfloat16)
+    x0 = torch.randn(2, 5, 32, dtype=torch.bfloat16)
+
+    def run(module, x):
+        x = x.clone().requires_grad_(True)
+        outputs = module(x)
+        sum(output.double().square().mean() for output in outputs).backward()
+        grads = [
+            param.grad
+            for name, param in sorted(module.named_parameters())
+            if "lora_" in name
+        ]
+        result = [
+            tensor.detach().double().clone()
+            for tensor in (*outputs, x.grad, *grads)
+        ]
+        module.zero_grad(set_to_none=True)
+        return result
+
+    oracle = run(copy.deepcopy(model).double(), x0.double())
+    reference = run(model, x0)
+    assert patch_fast_lora_qkv(model) == 1
+    fast = run(model, x0)
+    for got, ref, exact in zip(fast, reference, oracle):
+        assert (got - exact).abs().max() <= 2 * (ref - exact).abs().max() + 1e-8
 
 
 class TestStreamedModel:

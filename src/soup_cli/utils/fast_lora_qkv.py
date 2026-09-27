@@ -25,6 +25,7 @@ from soup_cli.utils.fast_lora import (
     _flatten,
     _is_supported_lora_projection,
     _projection_state,
+    _scaled_lora_add,
 )
 
 _PATCH_MARKER = "_soup_fast_lora_qkv"
@@ -82,11 +83,7 @@ def _qkv_function() -> Any:
                     a, b, scaling = adapters[i]
                     rank = a.shape[0]
                     hi = h[..., cursor : cursor + rank]
-                    outs[i] = torch.add(
-                        outs[i],
-                        torch.matmul(hi, b.t()).to(outs[i].dtype),
-                        alpha=float(scaling),
-                    )
+                    outs[i] = _scaled_lora_add(outs[i], hi, b, scaling)
                     cursor += rank
             else:
                 h = x.new_empty((*x.shape[:-1], 0))
@@ -294,6 +291,13 @@ def patch_fast_lora_qkv(model: Any) -> int:
         projections = [
             getattr(module, name) for name in ("q_proj", "k_proj", "v_proj")
         ]
+        # Shared-X fusion is only valid when Q, K and V consume the same-width
+        # tensor.  Cross-attention modules such as TrOCR use a narrower memory
+        # input for K/V; patching them would make q_proj speculatively apply the
+        # K/V weights to the query and fail before delegation can occur.
+        widths = {getattr(proj, "in_features", None) for proj in projections}
+        if len(widths) != 1 or None in widths:
+            continue
         if any(hasattr(proj, "modules_to_save") for proj in projections):
             continue
         if any(
