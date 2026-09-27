@@ -214,6 +214,50 @@ def test_cuda_route_follows_bitsandbytes_shape_decision_on_cpu(
         assert calls == []
 
 
+@pytest.mark.parametrize(
+    ("shape", "expected", "expected_m"),
+    [
+        ((1, 97, 64), False, None),
+        ((2, 3, 64), True, 6),
+    ],
+    ids=["three-dimensional-above-m-cap", "three-dimensional-fused"],
+)
+def test_cuda_route_flattens_all_leading_dimensions_on_cpu(
+    monkeypatch, shape, expected, expected_m
+):
+    from types import SimpleNamespace
+
+    import bitsandbytes.backends.cuda as bnb_cuda_package
+
+    from soup_cli.utils.layer_stream_runtime import _can_use_checkpoint_visible_nf4_gemm
+
+    calls = []
+
+    def use_custom_fn(device_index, dtype, rows, out_features, in_features):
+        calls.append((device_index, dtype, rows, out_features, in_features))
+        return True
+
+    fake_ops = SimpleNamespace(
+        _gemm_4bit_custom_max_m=96,
+        _gemm_4bit_use_custom_fn=use_custom_fn,
+    )
+    monkeypatch.setitem(sys.modules, "bitsandbytes.backends.cuda.ops", fake_ops)
+    monkeypatch.setattr(bnb_cuda_package, "ops", fake_ops, raising=False)
+    x = SimpleNamespace(
+        device=SimpleNamespace(type="cuda", index=0),
+        dtype=torch.bfloat16,
+        shape=shape,
+        numel=lambda: shape[0] * shape[1] * shape[2],
+    )
+    state = SimpleNamespace(nested=False, shape=(128, 64), blocksize=64)
+
+    assert _can_use_checkpoint_visible_nf4_gemm(x, state) is expected
+    if expected_m is None:
+        assert calls == []
+    else:
+        assert calls == [(0, torch.bfloat16, expected_m, 128, 64)]
+
+
 def test_backward_refuses_a_recycled_stream_slot():
     torch.manual_seed(31)
     packed, state = bnb_functional.quantize_4bit(
@@ -274,6 +318,108 @@ def test_streamed_layer_caches_substitution_views_for_one_pool_mapping(
     third = layer._substituted_weights(other_mapping)
     assert third is not first
     assert calls["n"] == 2 * quantized
+
+
+def test_missing_bnb_private_dispatch_symbols_fail_toward_safe_function_on_cpu(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    import bitsandbytes.backends.cuda as bnb_cuda_package
+
+    from soup_cli.utils.layer_stream_runtime import _can_use_checkpoint_visible_nf4_gemm
+
+    fake_ops = SimpleNamespace()
+    monkeypatch.setitem(sys.modules, "bitsandbytes.backends.cuda.ops", fake_ops)
+    monkeypatch.setattr(bnb_cuda_package, "ops", fake_ops, raising=False)
+    x = SimpleNamespace(
+        device=SimpleNamespace(type="cuda", index=0),
+        dtype=torch.bfloat16,
+        shape=(512, 64),
+        numel=lambda: 512 * 64,
+    )
+    state = SimpleNamespace(nested=False, shape=(128, 64), blocksize=64)
+
+    assert _can_use_checkpoint_visible_nf4_gemm(x, state) is True
+
+
+def test_forced_function_in_a_recycling_stream_matches_unpatched_resident(
+    tmp_path, monkeypatch
+):
+    from test_v07202 import (
+        _nf4_stream,
+        _randomise_lora_b,
+        _resident_nf4,
+        _sync_adapters,
+    )
+
+    import soup_cli.utils.layer_stream_runtime as runtime_module
+
+    calls = {"function": 0, "owner_checks": 0}
+    real_function = runtime_module.checkpoint_visible_nf4_linear
+
+    def counting_function(x, packed, quant_state, bias=None):
+        calls["function"] += 1
+        check = getattr(packed, "_soup_stream_owner_check", None)
+        assert check is not None, "streamed NF4 weight carries no slot-owner check"
+
+        def counted_check():
+            calls["owner_checks"] += 1
+            check()
+
+        packed._soup_stream_owner_check = counted_check
+        try:
+            return real_function(x, packed, quant_state, bias)
+        finally:
+            packed._soup_stream_owner_check = check
+
+    monkeypatch.setattr(
+        runtime_module, "checkpoint_visible_nf4_linear", counting_function
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "_can_use_checkpoint_visible_nf4_gemm",
+        lambda *_args, **_kwargs: True,
+    )
+
+    # Four layers over two buffers: every slot is refilled by another layer mid-step.
+    streamed, runtime, weights, _index, _shards = _nf4_stream(
+        tmp_path, n_layers=4, buffers=2
+    )
+    resident = _resident_nf4(weights)
+    _randomise_lora_b(resident)
+    assert _sync_adapters(streamed, resident) > 0
+
+    input_ids = torch.randint(
+        0, 64, (1, 16), generator=torch.Generator().manual_seed(5)
+    )
+    batch = {
+        "input_ids": input_ids,
+        "attention_mask": torch.ones_like(input_ids),
+        "labels": input_ids,
+    }
+    streamed.train()
+    resident.train()
+    streamed_loss = streamed(**batch).loss
+    streamed_loss.backward()
+    resident_loss = resident(**batch).loss
+    resident_loss.backward()
+
+    assert calls["function"] > 0 and calls["owner_checks"] > 0
+    assert runtime.pool.loads > 4, "no slot was recycled"
+    assert torch.equal(streamed_loss, resident_loss)
+
+    def lora_grads(model):
+        return {
+            name.replace(".inner.", "."): parameter.grad
+            for name, parameter in model.named_parameters()
+            if "lora_" in name and parameter.grad is not None
+        }
+
+    mine, theirs = lora_grads(streamed), lora_grads(resident)
+    assert mine and mine.keys() == theirs.keys()
+    for name, grad in mine.items():
+        assert torch.equal(grad, theirs[name]), name
 
 
 @pytest.mark.gpu
@@ -387,7 +533,7 @@ def test_streamed_matches_unpatched_resident_logits_and_all_lora_grads(
     import soup_cli.utils.layer_stream_runtime as runtime_module
 
     streamed, _runtime, weights, _index, _shards = _nf4_stream(
-        tmp_path, device="cuda", dtype="bfloat16"
+        tmp_path, n_layers=4, buffers=2, device="cuda", dtype="bfloat16"
     )
     resident = _resident_nf4(weights, dtype="bfloat16", device=0)
     _randomise_lora_b(resident)
