@@ -47,6 +47,22 @@ def test_orpo_and_simpo_full_sequences_are_stretched_but_prompt_is_not():
     assert out["prompt_input_ids"].shape == (1, 2)
 
 
+def test_stretched_labels_follow_ids_when_the_original_row_ends_ignored():
+    import torch
+
+    from soup_cli.trainer.stream_setup import _stretch_preference_probe_batch
+
+    batch = {
+        "chosen_input_ids": torch.tensor([[1, 2, 3]]),
+        "chosen_attention_mask": torch.ones((1, 3), dtype=torch.long),
+        "chosen_labels": torch.tensor([[-100, 2, -100]]),
+    }
+    out = _stretch_preference_probe_batch(batch, seq_len=6)
+    assert out["chosen_labels"][0, :3].equal(batch["chosen_labels"][0])
+    assert out["chosen_labels"][0, 3:].equal(out["chosen_input_ids"][0, 3:])
+    assert out["chosen_labels"][0, 3:].eq(3).all()
+
+
 def test_kto_stretches_policy_and_kl_sequences():
     import torch
 
@@ -208,6 +224,68 @@ def test_pending_probe_executes_trainer_compute_loss(monkeypatch):
     assert wrapper._stream_runtime.closed == 0
 
 
+def test_an_attribute_the_probe_creates_is_removed_again(monkeypatch):
+    import torch
+
+    from soup_cli.trainer.stream_setup import StreamingSetupMixin, _ProbePlan
+    from soup_cli.utils.layer_stream_runtime import StepPeak
+
+    class Runtime:
+        def close(self):
+            pass
+
+    class Trainer:
+        def __init__(self):
+            self._metrics = {"train": {"loss": [1.0]}}
+
+        def get_train_dataloader(self):
+            return [{
+                "input_ids": torch.tensor([[1, 2, 3], [1, 4, 5]]),
+                "attention_mask": torch.ones((2, 3), dtype=torch.long),
+            }]
+
+        def compute_loss(self, model, batch):
+            self._stored_metrics = {"train": {"rewards": [9.0]}}
+            return model.weight.sum()
+
+    class Wrapper(StreamingSetupMixin):
+        pass
+
+    wrapper = Wrapper()
+    wrapper.model = torch.nn.Linear(4, 4, bias=False)
+    wrapper.trainer = Trainer()
+    wrapper.device = "cuda"
+    wrapper._stream_runtime = Runtime()
+    wrapper._pending_stream_vram_probe = _ProbePlan(
+        task="dpo",
+        batch_size=1,
+        rows=2,
+        seq_len=8,
+        vocab_size=64,
+        predicted_bytes=100,
+        available_bytes=1_000,
+    )
+
+    def fake_measure(model, *, step, rows, seq_len, device):
+        step()
+        return StepPeak(
+            peak_bytes=200,
+            reserved_bytes=220,
+            seconds=0.01,
+            rows=rows,
+            seq_len=seq_len,
+        )
+
+    monkeypatch.setattr(
+        "soup_cli.utils.layer_stream_runtime.measure_loss_step_peak_bytes",
+        fake_measure,
+    )
+    before = set(vars(wrapper.trainer))
+    wrapper._run_pending_stream_vram_probe()
+    assert "_stored_metrics" not in vars(wrapper.trainer)
+    assert set(vars(wrapper.trainer)) == before
+
+
 @pytest.mark.parametrize(
     ("batch", "message"),
     [
@@ -358,4 +436,48 @@ def test_probe_forward_matches_accelerate_native_amp_contract_on_cpu(monkeypatch
     assert model.autocast_states == [True]
     assert model.logits_dtypes == [torch.bfloat16]
     assert output.dtype == torch.float32
+    assert "forward" not in vars(model)
+
+
+def _autocast_cpu(monkeypatch):
+    import torch
+
+    monkeypatch.setattr(
+        "accelerate.utils.modeling.get_mixed_precision_context_manager",
+        lambda *_args, **_kwargs: torch.autocast("cpu", dtype=torch.bfloat16),
+    )
+    return SimpleNamespace(
+        accelerator=SimpleNamespace(native_amp=True, autocast_handler=None)
+    )
+
+
+def test_an_instance_forward_is_put_back(monkeypatch):
+    import torch
+
+    from soup_cli.trainer.stream_setup import _trainer_forward_for_probe
+
+    trainer = _autocast_cpu(monkeypatch)
+    model = torch.nn.Linear(8, 8)
+
+    def instance_forward(x):
+        return torch.nn.Linear.forward(model, x)
+
+    model.forward = instance_forward
+    with _trainer_forward_for_probe(trainer, model):
+        assert model(torch.randn(2, 8)).dtype == torch.float32
+        assert vars(model)["forward"] is not instance_forward
+    assert vars(model)["forward"] is instance_forward
+
+
+def test_the_forward_is_put_back_when_the_step_raises(monkeypatch):
+    import torch
+
+    from soup_cli.trainer.stream_setup import _trainer_forward_for_probe
+
+    trainer = _autocast_cpu(monkeypatch)
+    model = torch.nn.Linear(8, 8)
+    with pytest.raises(RuntimeError, match="step failed"):
+        with _trainer_forward_for_probe(trainer, model):
+            assert "forward" in vars(model)
+            raise RuntimeError("step failed")
     assert "forward" not in vars(model)
