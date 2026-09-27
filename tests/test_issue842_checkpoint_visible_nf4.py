@@ -277,6 +277,23 @@ def test_backward_refuses_a_recycled_stream_slot():
         output.square().sum().backward()
 
 
+def test_the_production_owner_check_refuses_a_recycled_slot(tmp_path):
+    from test_v07202 import _nf4_stream
+
+    import soup_cli.utils.layer_stream_runtime as runtime_module
+
+    model, runtime, _, _, _ = _nf4_stream(tmp_path, n_layers=4, buffers=2)
+    layer = runtime_module.decoder_owner(model).layers[0]
+    slot = runtime.pool.slot_for(layer.idx)
+
+    runtime.pool.owner[slot] = layer.idx
+    layer._assert_nf4_slot_owner()
+
+    runtime.pool.owner[slot] = layer.idx + 2
+    with pytest.raises(RuntimeError, match="recycled weight slot"):
+        layer._assert_nf4_slot_owner()
+
+
 def test_streamed_layer_caches_substitution_views_for_one_pool_mapping(
     tmp_path, monkeypatch
 ):
