@@ -633,16 +633,16 @@ class TestNoSecondModelInstance:
 
 @pytest.mark.gpu(reason="the preference-loss peak instrument needs CUDA")
 class TestPreferenceLossProbeOnRealHardware:
-    """Drive #840's new instrument through real TRL DPO and KTO losses.
+    """Drive #840's new instrument through real TRL DPO and KTO losses on CUDA.
 
-    The older GPU tests below prove that preference training still works, but
-    they never enable the deferred probe.  This is deliberately a direct test
-    of ``measure_loss_step_peak_bytes`` using the same prepared trainer batch,
-    AMP forward wrapper and fitted prediction as the production path.
+    The first backward in a process creates the autograd thread's cuBLAS
+    workspace (32 MiB per handle on this card) and it stays allocated, so a
+    first measurement also counts memory the step does not own. One warm-up
+    probe makes every later measurement start from the same resident set.
     """
 
     @pytest.mark.parametrize("task", ("dpo", "kto"))
-    def test_real_loss_peak_is_positive_and_within_the_fitted_bound(
+    def test_real_loss_peak_moves_with_the_shape_and_fits_the_fitted_bound(
         self, tmp_path, monkeypatch, task
     ):
         import gc
@@ -668,10 +668,7 @@ class TestPreferenceLossProbeOnRealHardware:
         monkeypatch.setattr(
             layer_stream_module, "estimate_stream_peak_vram", capture_estimate
         )
-        wrapper = None
-        trainer = None
-        model = None
-        batch = None
+        wrapper = trainer = model = raw = None
         try:
             wrapper, _, _ = _build_streamed_wrapper(
                 tmp_path, monkeypatch, task=task, n_layers=2
@@ -679,33 +676,43 @@ class TestPreferenceLossProbeOnRealHardware:
             assert len(predicted) == 1
             trainer = wrapper.trainer
             model = wrapper.model
-            batch = next(iter(trainer.get_train_dataloader()))
-            batch = _stretch_preference_probe_batch(batch, seq_len=64)
-            rows = _preference_probe_rows(batch)
-            batch = _batch_on(model, batch)
+            raw = next(iter(trainer.get_train_dataloader()))
 
-            model.train()
-            with _trainer_forward_for_probe(trainer, model):
-                peak = measure_loss_step_peak_bytes(
-                    model,
-                    step=lambda: trainer.compute_loss(model, batch),
-                    rows=rows,
-                    seq_len=64,
-                    device="cuda",
-                )
+            def probe(seq_len):
+                batch = _stretch_preference_probe_batch(raw, seq_len=seq_len)
+                rows = _preference_probe_rows(batch)
+                batch = _batch_on(model, batch)
+                model.train()
+                with _trainer_forward_for_probe(trainer, model):
+                    peak = measure_loss_step_peak_bytes(
+                        model,
+                        step=lambda: trainer.compute_loss(model, batch),
+                        rows=rows,
+                        seq_len=seq_len,
+                        device="cuda",
+                    )
+                assert peak is not None and not peak.oom and not peak.failed
+                assert peak.rows == rows and peak.seq_len == seq_len and peak.seconds > 0
+                assert all(parameter.grad is None for parameter in model.parameters())
+                return peak
 
-            assert peak is not None and not peak.oom and not peak.failed
-            assert 0 < peak.peak_bytes <= predicted[0], (
-                f"{task}: measured {peak.peak_bytes} bytes against fitted "
-                f"bound {predicted[0]}"
+            probe(64)  # warm-up: creates the per-thread cuBLAS workspaces
+            torch.cuda.synchronize()
+            resident = torch.cuda.memory_allocated()
+            short = probe(32)
+            full = probe(64)
+            assert resident < short.peak_bytes < full.peak_bytes, (
+                f"{task}: resident {resident}, seq 32 {short.peak_bytes}, "
+                f"seq 64 {full.peak_bytes}"
             )
-            assert peak.rows == rows and peak.seq_len == 64
-            assert peak.seconds > 0
-            assert all(parameter.grad is None for parameter in model.parameters())
+            assert full.peak_bytes - resident <= predicted[0], (
+                f"{task}: the step added {full.peak_bytes - resident} bytes above "
+                f"the resident {resident}, against a fitted bound of {predicted[0]}"
+            )
         finally:
             if wrapper is not None:
                 wrapper._close_stream_runtime()
-            batch = model = trainer = wrapper = None
+            raw = model = trainer = wrapper = None
             gc.collect()
             torch.cuda.empty_cache()
 
