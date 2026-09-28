@@ -383,6 +383,34 @@ def test_loss_instrument_uses_allocated_peak_runs_backward_and_clears_grads(monk
     assert all(parameter.grad is None for parameter in model.parameters())
 
 
+def test_loss_instrument_resets_the_peak_counter_before_the_step(monkeypatch):
+    import torch
+
+    from soup_cli.utils.layer_stream_runtime import measure_loss_step_peak_bytes
+
+    events = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda *args: None)
+    monkeypatch.setattr(
+        torch.cuda, "reset_peak_memory_stats", lambda *args: events.append("reset")
+    )
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda *args: 123)
+    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda *args: 456)
+    model = torch.nn.Linear(4, 1)
+    x = torch.randn(3, 4)
+
+    def step():
+        events.append("step")
+        return model(x).square().mean()
+
+    peak = measure_loss_step_peak_bytes(
+        model, step=step, rows=3, seq_len=1, device="cuda"
+    )
+    assert peak is not None and not peak.failed
+    assert events == ["reset", "step"]
+
+
 def test_loss_instrument_classifies_non_finite_loss_as_failed(monkeypatch):
     import torch
 
