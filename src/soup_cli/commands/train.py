@@ -1863,7 +1863,15 @@ def train(
         raise
 
     try:
-        with profiler_ctx, energy_ctx:
+        with profiler_ctx as profiler, energy_ctx:
+            if profile_run and profiler is not None:
+                from soup_cli.utils.profiling import attach_profile_callback
+
+                if not attach_profile_callback(trainer_wrapper, profiler):
+                    console.print(
+                        "[yellow]--profile:[/] this trainer has no step hook, "
+                        "so no trace will be written"
+                    )
             result = trainer_wrapper.train(
                 display=display, tracker=tracker, run_id=run_id,
                 resume_from_checkpoint=resume_from,
