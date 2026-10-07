@@ -773,6 +773,9 @@ class GRPOTrainerWrapper:
                     batch_size=self._batch_size,
                     run_id=run_id,
                     output_dir=self._output_dir,
+                    # #1389: grpo's validation number is the held-out
+                    # reward, not TRL's policy objective in `eval_loss`.
+                    task=self.config.task,
                 )
             )
 
