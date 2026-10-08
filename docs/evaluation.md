@@ -269,6 +269,20 @@ The statistic is a Bayes factor that averages over both the size of the differen
 
 `--effect-size` is in the metric's units, but the statistic needs it in standard deviations. So the first 5 rows of each arm set that scale (their pooled standard deviation) and are not otherwise tested; the verdict table shows this as `prior_scale`, and the reported means and row counts still cover every row. If an arm's first rows are all identical, more rows are held out until one differs. If they barely vary (a warm cache, or a judge that gives 1.0 early), `accept_h0` waits as `continue` while the tested rows' standard deviation is more than 3 times theirs: that start makes the prior far too wide. A `reject_h0` is never held back.
 
+That wait is worth reading, because the held-out rows are fixed: once the hold fires, **more rows of the same kind never release it**. A run in that state is stuck at `continue` with the accept rule already satisfied — the confidence sequence for the difference lies inside `(-effect_size, +effect_size)` — so the verdict reports the hold rather than leaving you to guess, and the panel prints one line naming the ratio and what to do about it:
+
+```text
+Held back: the tested rows spread 25.7 times the held-out ones (held_out_spread
+0.002218, tested_spread 0.05706, limit 3x), so accept_h0 is withheld even though
+the confidence sequence for the difference is already inside +-0.1. The first 5
+rows of each arm set the scale of --effect-size and barely vary (a warm cache, or
+a judge that gives the same score early). Those rows are fixed, so more samples of
+the same kind will not release the hold: drop them, or reorder the input so the
+first rows vary, and re-run.
+```
+
+The same three facts are on the verdict returned by `run_msprt` / `msprt_step`: `accept_held` (bool), `held_out_spread` and `tested_spread` (the two pooled standard deviations, both `null` when nothing is held — a `continue` with no hold carries no explanation). The held-out rows' spread is measured over however many rows were actually held out, which is more than 5 when an arm's first rows are all identical. A webhook is never sent for a held run: `accept_held=True` is only legal on a `continue`, and the webhook fires only on a terminal decision.
+
 A simulation of the re-run-after-every-pair procedure (`--effect-size` from 0.1 to 5 standard deviations, 100,000 runs each, up to 1000 rows per arm) gives a worst false-positive rate of 0.033 at `--alpha 0.05` and 0.0066 at `--alpha 0.01`. The burn-in design this replaced (#1227) sat at 0.051 and 0.011. Against a true difference of exactly `--effect-size`, the test finds it with probability above 0.99 at `--alpha 0.05` or below when `--effect-size` is at least 0.3 standard deviations (1000 rows per arm; 0.984 at `--alpha 0.1`). There are two costs. When `--effect-size` is below about 0.2 standard deviations, 1000 rows are too few for either design to be reliable, and this one detects less often (0.31 against 0.45 at 0.1 standard deviations, `--alpha 0.05`). And when there is no difference, reaching `accept_h0` takes longer than under the burn-in design at small effect sizes. Mean pairs at stop when the two arms are the same, `--alpha 0.05`, runs of up to 1000 rows per arm, by `--effect-size` in standard deviations:
 
 | `--effect-size` / sd | 0.2 | 0.3 | 0.4 | 0.5 | 0.7 | 1 | 1.5 | 2 | 5 |
