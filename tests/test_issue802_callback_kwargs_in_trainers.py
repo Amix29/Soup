@@ -136,7 +136,7 @@ class TestTrainerCallbackKwargsUsage:
 class TestBuildSoupTrainerCallback:
     """Tests for the shared trainer callback builder."""
 
-    def test_passes_eval_config_to_callback(self) -> None:
+    def test_builder_passes_core_fields_to_callback(self) -> None:
         config = SoupConfig(
             base="sshleifer/tiny-gpt2",
             task="grpo",
@@ -158,9 +158,9 @@ class TestBuildSoupTrainerCallback:
             output_dir="/tmp/output",
         )
 
-        assert callback.eval_config is config.eval
         assert callback.run_id == "test-run"
         assert callback.output_dir == "/tmp/output"
+        assert not hasattr(callback, "eval_config")
 
     def test_builder_passes_eval_gate_to_callback(self) -> None:
         config = SoupConfig(
@@ -503,7 +503,7 @@ class TestTrainerWrapperBehaviouralCallbackWiring:
         assert cb._grad_accum_enabled is True
         assert cb._grad_accum_batch == 8
 
-    def test_grpo_wrapper_train_wires_eval_config(
+    def test_grpo_wrapper_train_wires_eval_gate_config(
         self, tmp_path: Path
     ) -> None:
         from soup_cli.trainer.grpo import GRPOTrainerWrapper
@@ -512,9 +512,11 @@ class TestTrainerWrapperBehaviouralCallbackWiring:
             base="sshleifer/tiny-gpt2",
             task="grpo",
             data={"train": "train.jsonl", "format": "chatml"},
-            eval={
-                "auto_eval": True,
-                "benchmarks": ["mmlu"],
+            training={
+                "eval_gate": {
+                    "enabled": True,
+                    "suite": "evals/gate.yaml",
+                }
             },
         )
         wrapper._batch_size = 4
@@ -531,6 +533,6 @@ class TestTrainerWrapperBehaviouralCallbackWiring:
         ]
         assert len(soup_cbs) == 1
         cb = soup_cbs[0]
-        assert cb.eval_config is wrapper.config.eval
-        assert cb.eval_config.auto_eval is True
-        assert cb.eval_config.benchmarks == ["mmlu"]
+        assert cb.output_dir == str(tmp_path)
+        assert cb.eval_gate_config is wrapper.config.training.eval_gate
+        assert not hasattr(cb, "eval_config")
