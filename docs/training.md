@@ -1073,7 +1073,7 @@ Decoded in-memory PIL images (such as from a Hugging Face Hub `Image()` column) 
 image structs (`{"bytes": ..., "path": ...}`) written by `datasets` are also accepted; a struct's
 `path` follows the same directory resolution and path containment rules as a plain path string.
 
-`soup data inspect` automatically shows image statistics (count, formats, missing files) for vision datasets.
+`soup data inspect` resolves image paths the same way, or uses `--image-dir` when provided, and automatically shows image statistics (count, formats, missing files) for vision datasets.
 
 
 ## Audio / Speech Fine-tuning
