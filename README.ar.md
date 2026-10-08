@@ -1,4 +1,4 @@
-<!-- synced-from: README.md sha256:2c81448b707086960939bd1512e493ea4a0248aac5d073ad388f6260c1352537 -->
+<!-- synced-from: README.md sha256:ad8f9dd91ca5fd56ff6bda0b6b1c1efe26b4ab7e464bbf5bb8dca4faab55b810 -->
 <p align="center">🌍 <a href="README.md">English</a> | <a href="README.tr.md">Türkçe</a> | <strong>العربية</strong> | <a href="README.ja.md">日本語</a></p>
 
 <p align="center">
@@ -283,7 +283,7 @@ Alpaca وShareGPT وChatML وأزواج التفضيلات (DPO / ORPO / SimPO /
 
 ```bash
 soup train  --config soup.yaml        # درّب (SFT/DPO/GRPO/PPO/KTO/ORPO/SimPO/IPO/...)
-soup infer  --model ./output --input prompts.jsonl   # استدلال دُفعي
+soup infer  --model ./output --input prompts.jsonl --output results.jsonl   # استدلال دُفعي
 soup chat   --model ./output          # دردشة تفاعلية
 soup serve  --model ./output          # خادم API متوافق مع OpenAI
 soup ui                               # لوحة متصفح محلية
