@@ -905,7 +905,7 @@ When `eval.auto_eval: true`, Soup runs the configured evaluation once after `sou
 - `benchmarks` runs the configured `lm-eval-harness` benchmarks. Install the `soup-cli[eval]` extra above before enabling them.
 - `custom_tasks` runs the configured custom evaluation tasks against the trained model.
 - `judge` is not part of auto-evaluation; configure and run judge evaluation separately.
-- Auto-evaluation keeps `trust_remote_code` disabled even when `soup train --trust-remote-code` was passed, so for a base that ships custom code the evaluation is skipped with a message (`Auto-eval custom failed: ... Please pass the argument trust_remote_code=True`); run `soup eval custom ... --trust-remote-code` yourself for that case.
+- Auto-evaluation follows the run's `--trust-remote-code` flag: `soup train --trust-remote-code` passes it to the evaluation of the trained model (benchmarks and custom tasks); without the flag it stays off. There is no `soup.yaml` key for it.
 - If auto-evaluation fails, Soup reports the failure but does not fail an otherwise successful training run.
 - Auto-evaluation can take a significant amount of time. For example, MMLU evaluates multiple subtasks.
 
