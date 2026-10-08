@@ -375,7 +375,7 @@ so its 64-token live generation limit does not dilute the overlap score for long
 Without `--tokenizer`, it compares adjacent normalized words after ignoring stopwords and words of
 two letters or fewer; with `--tokenizer`, it compares adjacent sub-word tokens. This replaces the
 earlier set-Jaccard threshold semantics, so saved memorization results from older releases are not
-directly comparable.
+directly comparable. Unspaced scripts (like Lao, Khmer, Myanmar, and halfwidth katakana) are scored per character pair, like Thai. Symbol-only answers are compared by their symbols. Rows whose suffix has no tokens, such as whitespace-only or only stopwords, are skipped and counted as `skipped_no_tokens` in the evidence.
 
 **Seven failure-mode probes:**
 
