@@ -274,7 +274,9 @@ def _build_hardware_fit_input(cfg):
     seq_len = getattr(cfg.data, "max_length", None)
     if not isinstance(seq_len, int) or isinstance(seq_len, bool):
         return None
-    quant = {"none": "none", "4bit": "4bit", "8bit": "8bit"}.get(
+    # #1631: mxfp4 is dequantized on load and trains in bf16, so it is priced
+    # (and gated) like "none". The formats that stay packed are still skipped.
+    quant = {"none": "none", "4bit": "4bit", "8bit": "8bit", "mxfp4": "mxfp4"}.get(
         str(getattr(tcfg, "quantization", "none") or "none")
     )
     if quant is None:
@@ -370,6 +372,13 @@ def _hardware_fit_preflight(cfg, gpu_info, *, allow_oom_attempt: bool) -> None:
     if report.ok:
         return
     b = report.breakdown
+    # #1631: a "quantized" run priced like an unquantized one needs a word why.
+    note = (
+        "An MXFP4 base is dequantized on load, so this estimate prices the "
+        "bf16 model.\n"
+        if inp.quant == "mxfp4"
+        else ""
+    )
     tail = (
         "[yellow]--allow-oom-attempt set: launching anyway.[/]"
         if allow_oom_attempt
@@ -384,7 +393,7 @@ def _hardware_fit_preflight(cfg, gpu_info, *, allow_oom_attempt: bool) -> None:
             f"{report.available_vram_gb:.1f} GB available.\n"
             f"weights {b.weights_gb:.1f} | optim {b.optimizer_gb:.1f} | "
             f"grads {b.gradients_gb:.1f} | activations {b.activations_gb:.1f} "
-            f"| overhead {b.overhead_gb:.1f} GB\n\n" + tail,
+            f"| overhead {b.overhead_gb:.1f} GB\n" + note + "\n" + tail,
             title=(
                 "[yellow]Hardware-fit warning[/]"
                 if allow_oom_attempt
