@@ -508,6 +508,22 @@ whitespace tokens to the active tokenizer's integer ids. This catches subword
 repetition that punctuation-heavy decoded text can hide, but the score becomes
 tokenizer-specific rather than vocabulary-agnostic.
 
+The `info_rm` detector stays silent on any step whose median split leaves
+either half constant — a two-valued reward (e.g. `reward_fn: accuracy`'s 0/1)
+always does, and so does a continuous reward where half the batch lands on
+the same value (e.g. rewards clipped at 0). The separation index there would
+measure the success rate rather than reward-model health, so the step casts
+no vote: no baseline is recorded and nothing halts or mutates β (one warning
+is logged per run). The single exception: once a baseline exists, a step
+where *every* reward is identical still votes 0.0 — a 0/1 run never records
+a baseline and stays silent, while a genuinely collapsed continuous reward
+reads HACK as before. For two-valued rewards use
+`reward_hack_detector: rm_ensemble` or the length/repetition signals instead.
+**Changed:** before this version a constant-half split could record an
+inflated separation (~3×10⁴ at a 50% first step) as the baseline and classify
+later, healthier steps as HACK — detector logs and `mitigation_log.jsonl`
+files from runs before this version are not comparable.
+
 ### Closed-loop reward-hacking auto-mitigation (v0.71.26)
 
 The detectors above *halt*; `training.reward_hack_mitigation` (or the `--reward-hack-mitigation` flag) makes the trainer *self-correct* mid-run. It requires `reward_hack_detector` on a `grpo` transformers run, and has four modes:
