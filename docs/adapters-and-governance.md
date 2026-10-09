@@ -22,6 +22,7 @@
 - [Adapter Backdoor Scanner (`soup adapters scan`)](#adapter-backdoor-scanner-soup-adapters-scan)
 - [Adapter Sign + Verify (`soup adapters sign` / `verify`)](#adapter-sign--verify-soup-adapters-sign--verify)
 - [Strict Safetensors Mode (`soup adapters check-safetensors`)](#strict-safetensors-mode-soup-adapters-check-safetensors)
+- [Pre-Flight Adapter Health Audit (`soup adapters check`)](#pre-flight-adapter-health-audit-soup-adapters-check)
 - [Namespace Pinning (Anti-AI-Jacking)](#namespace-pinning-anti-ai-jacking)
 - [License-Conflict Matrix at Merge](#license-conflict-matrix-at-merge)
 - [Airgap Bundle (`soup airgap-bundle`)](#airgap-bundle-soup-airgap-bundle)
@@ -722,6 +723,32 @@ right to execute arbitrary code on load; refusing the file at the
 boundary is the only sound mitigation. Friendly advisory names the
 offending file and the canonical `from safetensors.torch import save_file`
 recipe. Exit code 3 under `--strict` for CI gating.
+
+
+## Pre-Flight Adapter Health Audit (`soup adapters check`)
+
+Pre-flight scan auditing single LoRA adapters for silent training failures (#1721):
+- **Total and per-layer ||dW||_F**: Frobenius norm of LoRA parameter updates (dW = scaling * (B @ A), with alpha / r for standard LoRA and alpha / sqrt(r) for rsLoRA) with float64 accumulation via matrix trace contraction.
+- **Live fraction**: Proportion of adapter layers with active, non-zero updates.
+- **All-zero lora_B layers**: Flags un-trained or zero-initialized layers that failed to move during training.
+- **Incomplete LoRA pairs**: Flags orphaned or partially-saved projections missing either A or B.
+- **Leaked .inner. keys**: Flags legacy wrapper namespaces for adapters saved prior to the #1011 save-time guard.
+
+```bash
+soup adapters check path/to/adapter/
+# Machine-readable output
+soup adapters check path/to/adapter/ --json
+```
+
+Outputs human diagnostics ending in a single verdict line: `alive` (exit code 0) or `inactive: <reason>` (exit code 2 for inactive/silent failure, distinct from usage error 1). Possible inactivity reasons include:
+- `all lora_B layers are zero (n/n)`
+- `lora_B layers are zero (k/n)`
+- `total ||ΔW||_F is 0.0`
+- `leaked .inner. keys detected (<n> tensors)`
+- `incomplete LoRA pairs detected (<n> orphans)`
+- `shape mismatch in LoRA projections (<n> layers)`
+- `non-finite weights detected (NaN/Inf)`
+- `no lora weights found`
 
 
 ## Namespace Pinning (Anti-AI-Jacking)
