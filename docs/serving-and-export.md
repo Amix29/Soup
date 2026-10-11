@@ -63,9 +63,29 @@ soup export --model ./merged --format gguf
 
 # Specify llama.cpp path manually
 soup export --model ./output --format gguf --llama-cpp /path/to/llama.cpp
+
+# Show the converter and quantizer's stdout/stderr while they run
+soup export --model ./output --format gguf --verbose
+
+# The environment manages its own conversion packages: never attempt pip
+soup export --model ./output --format gguf --no-install-deps --verbose
 ```
 
 Supported quantizations: `q4_0`, `q4_k_m`, `q5_k_m`, `q8_0`, `f16`, `f32`
+
+GGUF export prints phase lines for toolchain lookup, dependency checking, adapter
+merge when needed, conversion and quantization when needed. `--verbose` additionally
+streams the converter and quantizer's combined stdout/stderr as lines arrive; the
+child tool may buffer its own output. Without the flag, successful child-tool logs
+stay quiet. Both modes retain a failure summary; verbose mode keeps a bounded tail
+of the last 100 lines (up to 2,000 characters per line) for that summary.
+
+`--no-install-deps` checks `gguf`, `sentencepiece` and `protobuf` in Soup's Python
+environment and refuses with the missing package names before merging an adapter
+or looking up/cloning the toolchain. It never runs pip. Install the packages through
+your environment manager and retry. This flag does not disable toolchain lookup or
+cloning; use `--llama-cpp` to supply your own checkout. Both new flags apply only to
+`--format gguf`; other formats refuse them rather than ignore them.
 
 ### Building llama.cpp (required for quantized GGUF)
 
