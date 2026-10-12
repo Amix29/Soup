@@ -1,5 +1,6 @@
 """GGUF progress is live, and managed dependencies never invoke pip (#1760)."""
 
+import importlib.util
 import io
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ from typer.testing import CliRunner
 
 from soup_cli.cli import app
 from soup_cli.commands import export as export_module
+from tests.conftest import strip_ansi
 
 
 def test_verbose_conversion_delivers_output_before_child_exit(monkeypatch, tmp_path):
@@ -39,8 +41,9 @@ def test_verbose_conversion_delivers_output_before_child_exit(monkeypatch, tmp_p
     export_module._run_convert(script, tmp_path, destination, "f16", verbose=True)
     assert ack.exists()
     assert destination.read_bytes() == b"fixture"
-    assert "[red]literal[/]" in output.getvalue()
-    assert "\x1b" not in output.getvalue()
+    rendered = strip_ansi(output.getvalue())
+    assert "[red]literal[/]" in rendered
+    assert "\x1b" not in rendered
 
 
 def test_verbose_quantization_streams_stdout_and_stderr(monkeypatch, tmp_path):
@@ -60,8 +63,9 @@ def test_verbose_quantization_streams_stdout_and_stderr(monkeypatch, tmp_path):
     destination = tmp_path / "out.gguf"
     export_module._run_quantize(tmp_path, source, destination, "q4_0", verbose=True)
     assert destination.read_bytes() == b"quantized fixture"
-    assert "quant-out" in output.getvalue()
-    assert "quant-error-stream" in output.getvalue()
+    rendered = strip_ansi(output.getvalue())
+    assert "quant-out" in rendered
+    assert "quant-error-stream" in rendered
 
 
 @pytest.mark.parametrize("verbose", [False, True])
@@ -76,8 +80,8 @@ def test_conversion_failure_keeps_diagnostic_summary(monkeypatch, tmp_path, verb
     with pytest.raises(typer.Exit) as exc:
         export_module._run_convert(script, tmp_path, tmp_path / "out.gguf", "f16", verbose=verbose)
     assert exc.value.exit_code == 1
-    assert "Conversion failed" in output.getvalue()
-    rendered = output.getvalue()
+    rendered = strip_ansi(output.getvalue())
+    assert "Conversion failed" in rendered
     assert rendered.count("distinctive failure [/x] [bold]b[/][2J31m") == (2 if verbose else 1)
     assert "\x1b" not in rendered
     assert "\x9b" not in rendered
@@ -89,7 +93,7 @@ def test_default_conversion_success_stays_quiet(monkeypatch, tmp_path):
     output = io.StringIO()
     monkeypatch.setattr(export_module, "console", Console(file=output))
     export_module._run_convert(script, tmp_path, tmp_path / "out.gguf", "f16")
-    assert "child-success-log" not in output.getvalue()
+    assert "child-success-log" not in strip_ansi(output.getvalue())
 
 
 @pytest.fixture
@@ -121,8 +125,9 @@ def test_no_install_deps_missing_packages_refuses_before_merge_or_lookup(
     result = CliRunner().invoke(app, ["export", "--model", str(model), "--output",
                                     str(destination), "--no-install-deps"])
     assert result.exit_code == 1, result.output
-    assert "gguf" in result.output and "protobuf" in result.output
-    assert "--no-install-deps" in result.output
+    output = strip_ansi(result.output)
+    assert "gguf" in output and "protobuf" in output
+    assert "--no-install-deps" in output
     assert not (model.parent / ".soup_merge_tmp_model").exists()
     assert not destination.parent.exists()
 
@@ -152,9 +157,10 @@ def test_no_install_deps_present_never_runs_pip_and_reports_phases(monkeypatch, 
     assert result.exit_code == 0, result.output
     assert destination.read_bytes() == b"q4 fixture"
     assert calls == [("convert", {"verbose": True}), ("quantize", {"verbose": True})]
-    assert "GGUF: toolchain" in result.output
-    assert "GGUF: convert" in result.output
-    assert "GGUF: quantize" in result.output
+    output = strip_ansi(result.output)
+    assert "GGUF: toolchain" in output
+    assert "GGUF: convert" in output
+    assert "GGUF: quantize" in output
     assert not list(destination.parent.glob(".soup_gguf_*"))
 
 
@@ -164,17 +170,41 @@ def test_gguf_only_flags_are_not_silently_ignored(monkeypatch, cli_inputs, flag)
     result = CliRunner().invoke(app, ["export", "--model", str(model), "--format", "onnx",
                                     "--output", str(destination), flag])
     assert result.exit_code == 2, result.output
-    assert "--format gguf" in result.output
-    assert flag in result.output
+    output = strip_ansi(result.output)
+    assert "--format gguf" in output
+    assert flag in output
     other = "--no-install-deps" if flag == "--verbose" else "--verbose"
-    assert other not in result.output
+    assert other not in output
 
 
 def test_dependency_probe_names_all_missing_packages(monkeypatch):
-    import importlib.util
-
     monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
     assert export_module._missing_convert_deps() == ["gguf", "sentencepiece", "protobuf"]
+
+
+def test_only_protobuf_missing_is_probed_and_triggers_the_pip_attempt(monkeypatch):
+    real_find_spec = importlib.util.find_spec
+    probed = []
+
+    def find_spec(name, *args, **kwargs):
+        probed.append(name)
+        if name == "google.protobuf":
+            return None
+        return object()  # gguf and sentencepiece look installed
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+    assert export_module._missing_convert_deps() == ["protobuf"]
+    assert "google.protobuf" in probed
+    assert export_module._convert_deps_present() is False
+
+    runs = []
+    monkeypatch.setattr(
+        export_module.subprocess, "run",
+        lambda cmd, *args, **kwargs: runs.append(cmd) or type("R", (), {"returncode": 0})(),
+    )
+    export_module._install_convert_deps()
+    assert runs and "pip" in " ".join(map(str, runs[0]))
+    assert real_find_spec is not find_spec
 
 
 def test_stream_failure_keeps_only_a_bounded_tail(monkeypatch):
@@ -266,13 +296,14 @@ def test_cli_reports_each_reached_phase_once(monkeypatch, cli_inputs, quant, man
         "export", "--model", str(model), "--output", str(destination), "--quant", quant, *flags,
     ])
     assert result.exit_code == 0, result.output
-    assert result.output.count("GGUF: merge adapter") == int(adapter)
-    assert result.output.count("GGUF: conversion dependencies") == int(not managed)
-    assert result.output.count("GGUF: dependencies (managed environment)") == int(managed)
-    assert result.output.count("GGUF: toolchain lookup") == 1
+    output = strip_ansi(result.output)
+    assert output.count("GGUF: merge adapter") == int(adapter)
+    assert output.count("GGUF: conversion dependencies") == int(not managed)
+    assert output.count("GGUF: dependencies (managed environment)") == int(managed)
+    assert output.count("GGUF: toolchain lookup") == 1
     outtype = "f16" if quant == "q4_0" else quant
-    assert result.output.count(f"GGUF: convert — Converting to GGUF ({outtype})") == 1
-    assert result.output.count("GGUF: quantize") == int(quant == "q4_0")
+    assert output.count(f"GGUF: convert — Converting to GGUF ({outtype})") == 1
+    assert output.count("GGUF: quantize") == int(quant == "q4_0")
     assert ("dependencies", not managed) in calls
     assert ("convert", "f16" if quant == "q4_0" else quant) in calls
     assert convert_options == [{"verbose": True} if quant in ("f16", "f32") else {}]
