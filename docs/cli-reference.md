@@ -2349,6 +2349,8 @@ Usage: `soup export [OPTIONS]`
 | `--quant-config` | text |  |  | Path to YAML for torchao PTQ export (v0.53.1 #142). Required when --format=torchao. |
 | `--gguf-flavour` | text |  |  | Advanced GGUF format flag — UD-Q\*\_K_XL / IQ\*\_M / Q4_0_4_4 / etc. Required when --format=gguf-ud (v0.53.1 #139). |
 | `--hub` | text | `hf` |  | Source hub for the base model when --model is a LoRA adapter: hf (default) / modelscope / modelers (v0.53.10 #152). |
+| `--verbose` | flag | off |  | Stream GGUF converter and quantizer logs while they run. |
+| `--no-install-deps` | flag | off |  | GGUF only: never invoke pip; refuse missing conversion dependencies before work. |
 
 ## `soup fetch`
 

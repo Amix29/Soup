@@ -236,6 +236,7 @@ def test_cli_reports_each_reached_phase_once(monkeypatch, cli_inputs, quant, man
     if adapter:
         (model / "adapter_config.json").write_text('{"base_model_name_or_path":"base"}')
     calls = []
+    convert_options = []
 
     def deps(*, install=True):
         calls.append(("dependencies", install))
@@ -246,6 +247,7 @@ def test_cli_reports_each_reached_phase_once(monkeypatch, cli_inputs, quant, man
 
     def convert(script, source, output, outtype, **kwargs):
         calls.append(("convert", outtype))
+        convert_options.append(kwargs)
         output.write_bytes(b"converted fixture")
 
     def quantize(toolchain, source, output, quant, **kwargs):
@@ -258,6 +260,8 @@ def test_cli_reports_each_reached_phase_once(monkeypatch, cli_inputs, quant, man
     monkeypatch.setattr(export_module, "_run_convert", convert)
     monkeypatch.setattr(export_module, "_run_quantize", quantize)
     flags = ["--no-install-deps"] if managed else []
+    if quant in ("f16", "f32"):
+        flags.append("--verbose")
     result = CliRunner().invoke(app, [
         "export", "--model", str(model), "--output", str(destination), "--quant", quant, *flags,
     ])
@@ -271,6 +275,7 @@ def test_cli_reports_each_reached_phase_once(monkeypatch, cli_inputs, quant, man
     assert result.output.count("GGUF: quantize") == int(quant == "q4_0")
     assert ("dependencies", not managed) in calls
     assert ("convert", "f16" if quant == "q4_0" else quant) in calls
+    assert convert_options == [{"verbose": True} if quant in ("f16", "f32") else {}]
     if quant == "q4_0":
         assert ("quantize", "q4_0") in calls
     else:
