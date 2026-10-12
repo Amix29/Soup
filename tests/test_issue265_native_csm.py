@@ -66,22 +66,37 @@ def test_codec_string_configs_still_refused(fmt):
         SoupConfig(**values)
 
 
-@pytest.mark.parametrize("option", [
-    {"quantization": "4bit"}, {"packing": True}, {"multipack": True},
-    {"use_liger": True}, {"use_flash_attn": True}, {"freeze_ratio": 0.5},
-    {"auto_mixed_precision": True}, {"gradient_checkpointing": "selective"},
-    {"neftune_alpha": 5}, {"lr_groups": {"default": 0.0001}},
+@pytest.mark.parametrize("option, reason", [
+    ({"quantization": "4bit"}, "Sesame CSM requires training.quantization='none'"),
+    ({"packing": True}, "Sesame CSM does not support training.packing"),
+    ({"multipack": True}, "multipack=true is not supported for task='tts'"),
+    ({"use_liger": True}, "Sesame CSM does not support training.use_liger"),
+    ({"use_flash_attn": True}, "Sesame CSM does not support training.use_flash_attn"),
+    ({"freeze_ratio": 0.5}, "Sesame CSM does not support training.freeze_ratio"),
+    ({"auto_mixed_precision": True}, "Sesame CSM does not support training.auto_mixed_precision"),
+    ({"gradient_checkpointing": "selective"},
+     "Sesame CSM supports boolean training.gradient_checkpointing only"),
+    ({"neftune_alpha": 5}, "Sesame CSM does not support training.neftune_alpha"),
+    ({"lr_groups": {"default": 0.0001}}, "Sesame CSM does not support training.lr_groups"),
 ])
-def test_unsupported_training_settings_fail_before_model_load(option):
-    with pytest.raises(ValueError):
+def test_unsupported_training_settings_fail_before_model_load(option, reason):
+    import re
+
+    with pytest.raises(ValueError, match=re.escape(reason)):
         csm_config(**option)
 
 
-@pytest.mark.parametrize("option", [
-    {"target_modules": ["q_proj"]}, {"use_dora": True}, {"target_parameters": "auto"},
+@pytest.mark.parametrize("option, field", [
+    ({"target_modules": ["q_proj"]}, "target_modules"),
+    ({"use_dora": True}, "use_dora"),
+    ({"target_parameters": "auto", "dropout": 0}, "target_parameters"),
 ])
-def test_unsupported_lora_settings_are_explicit(option):
-    with pytest.raises(ValueError):
+def test_unsupported_lora_settings_are_explicit(option, field):
+    import re
+
+    with pytest.raises(ValueError, match=re.escape(
+        f"Sesame CSM does not support training.lora.{field}"
+    )):
         csm_config(lora=option)
 
 
@@ -98,19 +113,31 @@ def test_transcript_and_speaker_are_preserved(speaker):
     assert validate_csm_row(row) == ("clip.wav", speaker, "Exact transcript")
 
 
-@pytest.mark.parametrize("row", [
-    {}, speech_row(""), speech_row("a.wav", ""), speech_row("a.wav", "  "),
-    speech_row("a.wav", "Hello", "assistant"), speech_row("a.wav", "Hello", True),
-    {"audio": "a.wav", "messages": []},
-    {"audio": "a.wav", "messages": [{"role": "0", "content": []}]},
-    {"audio": "a.wav", "messages": [{"role": "0", "content": "Hi", "train": False}]},
-    {"audio": "a.wav", "messages": [{"role": "0", "content": "A"},
+@pytest.mark.parametrize("row, reason", [
+    ({}, "CSM row needs a non-empty local audio path"),
+    (speech_row(""), "CSM row needs a non-empty local audio path"),
+    (speech_row("a.wav", ""), "CSM transcript content must be non-empty text"),
+    (speech_row("a.wav", "  "), "CSM transcript content must be non-empty text"),
+    (speech_row("a.wav", "Hello", "assistant"),
+     "CSM transcript role must be the speaker id '0' or '1'"),
+    (speech_row("a.wav", "Hello", True),
+     "CSM transcript role must be the speaker id '0' or '1'"),
+    ({"audio": "a.wav", "messages": []},
+     "CSM row needs exactly one transcript message for its audio clip"),
+    ({"audio": "a.wav", "messages": [{"role": "0", "content": []}]},
+     "CSM transcript content must be non-empty text"),
+    ({"audio": "a.wav", "messages": [{"role": "0", "content": "Hi", "train": False}]},
+     "CSM transcript message must contain only role and content"),
+    ({"audio": "a.wav", "messages": [{"role": "0", "content": "A"},
                                       {"role": "1", "content": "B"}]},
+     "CSM row needs exactly one transcript message for its audio clip"),
 ])
-def test_ambiguous_rows_fail_instead_of_training_wrong_transcript(row):
+def test_ambiguous_rows_fail_instead_of_training_wrong_transcript(row, reason):
+    import re
+
     from soup_cli.utils.csm import validate_csm_row
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=re.escape(reason)):
         validate_csm_row(row)
 
 

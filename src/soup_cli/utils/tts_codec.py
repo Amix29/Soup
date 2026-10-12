@@ -22,7 +22,7 @@ per-family encoder) is family-agnostic. It now has codec-string encoders for:
 
 Spark and Oute raw-audio live encoding is deliberately refused on this path
 because their current upstream stacks are incompatible with Soup. Sesame CSM
-is also refused: current CSM training uses 32 Mimi codebooks plus text as
+is refused on this codec-string path: its native trainer uses 32 Mimi codebooks plus text as
 parallel multimodal frames, which cannot be represented faithfully by replacing
 a text assistant turn.
 

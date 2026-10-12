@@ -1821,8 +1821,8 @@ class TrainingConfig(BaseModel):
     ]] = Field(
         default=None,
         description=(
-            "TTS model family — required when task='tts'. Runnable choices are "
-            "orpheus, llasa, spark, and oute use codec-string SFT. sesame_csm uses "
+            "TTS model family — required when task='tts'. "
+            "orpheus, llasa, spark and oute use codec-string SFT; sesame_csm uses "
             "a native multimodal trainer with raw audio and 32 parallel Mimi codebooks."
         ),
     )
