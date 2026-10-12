@@ -69,14 +69,18 @@ def test_conversion_failure_keeps_diagnostic_summary(monkeypatch, tmp_path, verb
     import typer
 
     script = tmp_path / "fail.py"
-    script.write_text("import sys\nprint('distinctive failure', file=sys.stderr)\nsys.exit(4)\n")
+    payload = "distinctive failure [/x] [bold]b[/]\x1b[2J\x9b31m"
+    script.write_text(f"import sys\nprint({payload!r}, file=sys.stderr)\nsys.exit(4)\n")
     output = io.StringIO()
     monkeypatch.setattr(export_module, "console", Console(file=output))
     with pytest.raises(typer.Exit) as exc:
         export_module._run_convert(script, tmp_path, tmp_path / "out.gguf", "f16", verbose=verbose)
     assert exc.value.exit_code == 1
     assert "Conversion failed" in output.getvalue()
-    assert "distinctive failure" in output.getvalue()
+    rendered = output.getvalue()
+    assert rendered.count("distinctive failure [/x] [bold]b[/][2J31m") == (2 if verbose else 1)
+    assert "\x1b" not in rendered
+    assert "\x9b" not in rendered
 
 
 def test_default_conversion_success_stays_quiet(monkeypatch, tmp_path):
@@ -104,6 +108,7 @@ def test_no_install_deps_missing_packages_refuses_before_merge_or_lookup(
     monkeypatch, cli_inputs,
 ):
     model, llama, destination = cli_inputs
+    destination = destination.parent / "must-not-create" / "out.gguf"
     (model / "adapter_config.json").write_text('{"base_model_name_or_path":"unused"}')
     monkeypatch.setattr(export_module, "_missing_convert_deps", lambda: ["gguf", "protobuf"])
 
@@ -119,6 +124,7 @@ def test_no_install_deps_missing_packages_refuses_before_merge_or_lookup(
     assert "gguf" in result.output and "protobuf" in result.output
     assert "--no-install-deps" in result.output
     assert not (model.parent / ".soup_merge_tmp_model").exists()
+    assert not destination.parent.exists()
 
 
 def test_no_install_deps_present_never_runs_pip_and_reports_phases(monkeypatch, cli_inputs):
@@ -159,6 +165,9 @@ def test_gguf_only_flags_are_not_silently_ignored(monkeypatch, cli_inputs, flag)
                                     "--output", str(destination), flag])
     assert result.exit_code == 2, result.output
     assert "--format gguf" in result.output
+    assert flag in result.output
+    other = "--no-install-deps" if flag == "--verbose" else "--verbose"
+    assert other not in result.output
 
 
 def test_dependency_probe_names_all_missing_packages(monkeypatch):
@@ -217,3 +226,54 @@ def test_output_failure_terminates_the_child_and_closes_its_pipe(monkeypatch):
         export_module._run_export_tool(["fixture"], "Conversion", verbose=True)
     assert actions == ["terminate", "wait"]
     assert process.stdout.closed
+
+
+@pytest.mark.parametrize("quant", ["f16", "f32", "q4_0"])
+@pytest.mark.parametrize("managed", [False, True])
+@pytest.mark.parametrize("adapter", [False, True])
+def test_cli_reports_each_reached_phase_once(monkeypatch, cli_inputs, quant, managed, adapter):
+    model, llama, destination = cli_inputs
+    if adapter:
+        (model / "adapter_config.json").write_text('{"base_model_name_or_path":"base"}')
+    calls = []
+
+    def deps(*, install=True):
+        calls.append(("dependencies", install))
+
+    def merge(source, base, output, trust_remote_code):
+        calls.append(("merge", base))
+        Path(output).mkdir()
+
+    def convert(script, source, output, outtype, **kwargs):
+        calls.append(("convert", outtype))
+        output.write_bytes(b"converted fixture")
+
+    def quantize(toolchain, source, output, quant, **kwargs):
+        calls.append(("quantize", quant))
+        output.write_bytes(b"quantized fixture")
+
+    monkeypatch.setattr(export_module, "_install_convert_deps", deps)
+    monkeypatch.setattr(export_module, "_merge_adapter", merge)
+    monkeypatch.setattr(export_module, "_find_llama_cpp", lambda path: llama)
+    monkeypatch.setattr(export_module, "_run_convert", convert)
+    monkeypatch.setattr(export_module, "_run_quantize", quantize)
+    flags = ["--no-install-deps"] if managed else []
+    result = CliRunner().invoke(app, [
+        "export", "--model", str(model), "--output", str(destination), "--quant", quant, *flags,
+    ])
+    assert result.exit_code == 0, result.output
+    assert result.output.count("GGUF: merge adapter") == int(adapter)
+    assert result.output.count("GGUF: conversion dependencies") == int(not managed)
+    assert result.output.count("GGUF: dependencies (managed environment)") == int(managed)
+    assert result.output.count("GGUF: toolchain lookup") == 1
+    outtype = "f16" if quant == "q4_0" else quant
+    assert result.output.count(f"GGUF: convert — Converting to GGUF ({outtype})") == 1
+    assert result.output.count("GGUF: quantize") == int(quant == "q4_0")
+    assert ("dependencies", not managed) in calls
+    assert ("convert", "f16" if quant == "q4_0" else quant) in calls
+    if quant == "q4_0":
+        assert ("quantize", "q4_0") in calls
+    else:
+        assert all(name != "quantize" for name, _ in calls)
+    assert not (model.parent / ".soup_merge_tmp_model").exists()
+    assert not list(destination.parent.glob(".soup_gguf_*"))

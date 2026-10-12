@@ -218,7 +218,10 @@ def export(
         raise typer.Exit(1)
 
     if (verbose or no_install_deps) and fmt != "gguf":
-        console.print("[red]--verbose and --no-install-deps require --format gguf.[/]")
+        flags = [name for name, enabled in (
+            ("--verbose", verbose), ("--no-install-deps", no_install_deps),
+        ) if enabled]
+        console.print(f"[red]{' and '.join(flags)} require --format gguf.[/]")
         raise typer.Exit(2)
 
     model_name = Path(model).name
@@ -345,7 +348,7 @@ def export(
         )
         raise typer.Exit(1)
 
-    # --- Resolve and create the destination before any merge/convert work ---
+    # --- Resolve the destination before any merge/convert work ---
     # #1445 — a missing output parent used to surface as FileNotFoundError
     # from mkdtemp AFTER an adapter was merged, and the cleanup then deleted
     # the merged model. Create the parent up front (what ``_run_convert``
@@ -354,12 +357,13 @@ def export(
         output_path = Path(output)
     else:
         output_path = Path(model).parent / f"{model_name}.{quant}.gguf"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Managed environments must refuse missing deps before a merge or toolchain clone.
     if no_install_deps:
         console.print("[dim]GGUF: dependencies (managed environment)...[/]")
         _install_convert_deps(install=False)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # --- Check if LoRA adapter (needs merge first) ---
     adapter_config_path = model_path / "adapter_config.json"
