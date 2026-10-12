@@ -685,7 +685,9 @@ effect depends on the model's template.
 
 The public `encode_prompt` helper uses the same rendering, special-token handling and
 `MAX_PROMPT_TOKENS` budget (1024) as both generators. Template-rendered special tokens
-are not added a second time. For a caller-managed batch, prepare each prompt with
+are not added a second time. With the default right truncation, over-budget prompts
+lose their trailing tokens, which can include the generation prompt, as before.
+For a caller-managed batch, prepare each prompt with
 `return_tensors=None`, then pad the resulting encodings with the same tokenizer:
 
 ```python
@@ -705,13 +707,15 @@ answer = generate("hello")
 Configure the tokenizer's padding side appropriately for your batched model. The
 helper prepares inputs; it does not run batched generation. Template options cannot
 override `conversation`, `tokenize`, `add_generation_prompt`, `continue_final_message`,
-`return_tensors`, `return_dict`, `padding`, `truncation` or `max_length`. Generators
-snapshot the supplied options at construction. With `loaded`, model loading options
+`return_tensors`, `return_dict`, `padding`, `truncation`, `max_length`, `chat_template`
+or `return_assistant_tokens_mask`. Generators snapshot the supplied options, including
+nested values, at construction. With `loaded`, model loading options
 such as device and quantization are ignored; the supplied triple is used directly.
 
 `soup ship --chat-template-kwargs` accepts a JSON object, applies it equally to base
 and tuned generation, and refuses malformed options with usage exit code 3. The flag
-is live-only and cannot be combined with offline `--evidence`.
+is live-only and cannot be combined with offline `--evidence`. It applies to live
+task generation; it does not configure the lm-eval benchmark legs.
 
 ## Quant Calibration (KL Divergence)
 

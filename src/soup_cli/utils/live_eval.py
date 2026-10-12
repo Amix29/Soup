@@ -144,6 +144,7 @@ def validate_chat_template_kwargs(value: Optional[dict]) -> dict:
     reserved = {
         "conversation", "tokenize", "add_generation_prompt", "continue_final_message",
         "return_tensors", "return_dict", "padding", "truncation", "max_length",
+        "chat_template", "return_assistant_tokens_mask",
     }
     overlap = reserved.intersection(value)
     if overlap:
@@ -172,7 +173,9 @@ def _render_prompt_template(
             )
         except Exception as exc:  # noqa: BLE001 — default malformed template → raw prompt
             if chat_template_kwargs:
-                raise ValueError("cannot render chat template with chat_template_kwargs") from exc
+                raise ValueError(
+                    f"cannot render chat template with chat_template_kwargs: {exc}"
+                ) from exc
             return prompt, False
         return text, True
     if chat_template_kwargs:

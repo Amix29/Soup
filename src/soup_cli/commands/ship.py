@@ -175,7 +175,7 @@ def _parse_chat_template_kwargs(value: Optional[str]) -> Optional[dict]:
         if not isinstance(options, dict):
             raise ValueError("expected a JSON object")
         return validate_chat_template_kwargs(options)
-    except (ValueError, TypeError) as exc:
+    except (ValueError, TypeError, RecursionError) as exc:
         _fail(f"--chat-template-kwargs: {exc}", _EXIT_USAGE)
 
 

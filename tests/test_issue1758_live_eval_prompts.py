@@ -84,13 +84,20 @@ def test_public_prompt_budget_and_batch_padding(tokenizer):
         for text in ["hello " * 2000, "world"]
     ]
     assert len(encoded[0]["input_ids"]) == live_eval.MAX_PROMPT_TOKENS == 1024
+    assert encoded[0]["input_ids"][-1] == tokenizer.convert_tokens_to_ids("hello")
+    assert tokenizer.convert_tokens_to_ids("assistant") not in encoded[0]["input_ids"]
     batch = tokenizer.pad(encoded, padding=True, return_tensors="pt")
     assert batch["input_ids"].shape == (2, 1024)
     assert batch["attention_mask"][1].sum() == len(encoded[1]["input_ids"])
 
 
-@pytest.mark.parametrize("options", [[], "bad", {1: False}, {"tokenize": True},
-                                    {"add_generation_prompt": False}, {"max_length": 1}])
+@pytest.mark.parametrize("options", [
+    [], "bad", {1: False}, {"conversation": []}, {"tokenize": True},
+    {"add_generation_prompt": False}, {"continue_final_message": True},
+    {"return_tensors": "pt"}, {"return_dict": True}, {"padding": True},
+    {"truncation": True}, {"max_length": 1}, {"chat_template": "replacement"},
+    {"return_assistant_tokens_mask": True},
+])
 def test_invalid_options_fail_before_loading(monkeypatch, tokenizer, options):
     def unexpected(*args, **kwargs):
         pytest.fail("invalid options must fail before loading")
@@ -132,7 +139,8 @@ def test_ship_forwards_options_to_base_and_tuned(monkeypatch, adapter):
 
 
 @pytest.mark.parametrize("value", ["[]", "null", "bad", '{"tokenize":true}',
-                                  '{"enable_thinking":NaN}'])
+                                  '{"enable_thinking":NaN}', '{"chat_template":"replacement"}',
+                                  '{"return_assistant_tokens_mask":true}'])
 def test_ship_invalid_json_options_are_usage_errors(value):
     result = CliRunner().invoke(app, ["ship", "--chat-template-kwargs", value])
     assert result.exit_code == 3
@@ -181,3 +189,47 @@ def test_live_ship_cli_options_reach_both_generators(monkeypatch, tmp_path):
     assert result.exit_code == 0, result.output
     assert [call[0] for call in calls] == ["base", "tuned"]
     assert all(call[1]["chat_template_kwargs"] == {"enable_thinking": False} for call in calls)
+
+
+@pytest.mark.parametrize("factory", ["make_generator", "make_multi_generator"])
+def test_generators_snapshot_nested_template_options(tokenizer, factory):
+    import torch
+
+    tokenizer.chat_template = (
+        "{{ bos_token }}{{ messages[0]['content'] }} "
+        "{% if settings.flags.enable_thinking %}think{% else %}answer{% endif %}"
+        "{% if add_generation_prompt %} assistant{% endif %}"
+    )
+
+    class Recorder:
+        sent = None
+
+        def generate(self, input_ids, **kwargs):
+            self.sent = input_ids.tolist()[0]
+            return torch.cat([input_ids, input_ids[:, -1:]], dim=1)
+
+    model = Recorder()
+    options = {"settings": {"flags": {"enable_thinking": False}}}
+    generate = getattr(live_eval, factory)(
+        "unused", loaded=(model, tokenizer, "cpu"), chat_template_kwargs=options,
+    )
+    options["settings"]["flags"]["enable_thinking"] = True
+    if factory == "make_multi_generator":
+        generate("hello", 1)
+    else:
+        generate("hello")
+    assert tokenizer.convert_tokens_to_ids("answer") in model.sent
+    assert tokenizer.convert_tokens_to_ids("think") not in model.sent
+
+
+def test_template_error_keeps_the_underlying_diagnostic(tokenizer):
+    tokenizer.chat_template = '{{ raise_exception("named rendering cause") }}'
+    with pytest.raises(ValueError, match="cannot render chat template.*named rendering cause"):
+        live_eval.encode_prompt(tokenizer, "hello", chat_template_kwargs={"enable_thinking": False})
+
+
+def test_ship_deeply_nested_json_is_a_usage_error():
+    value = '{"nested":' + '[' * 2000 + '0' + ']' * 2000 + '}'
+    result = CliRunner().invoke(app, ["ship", "--chat-template-kwargs", value])
+    assert result.exit_code == 3
+    assert "--chat-template-kwargs" in result.output
