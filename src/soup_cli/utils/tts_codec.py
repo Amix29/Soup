@@ -24,7 +24,8 @@ Spark and Oute raw-audio live encoding is deliberately refused on this path
 because their current upstream stacks are incompatible with Soup. Sesame CSM
 is refused on this codec-string path: its native trainer uses 32 Mimi codebooks plus text as
 parallel multimodal frames, which cannot be represented faithfully by replacing
-a text assistant turn.
+a text assistant turn. Raw-audio transcript pairs use the dedicated native CSM
+trainer instead.
 
 Security / robustness:
 - Heavy imports (numpy / soundfile / torch / snac / transformers) are lazy — module import
