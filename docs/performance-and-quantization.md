@@ -314,8 +314,7 @@ continue to work unchanged.
 GRPO, IPO, BCO, reward-model, online-DPO, pretrain and embedding explicitly
 forward this setting to their TRL/HF training arguments: `false` disables it
 and `true` enables it, including unquantized runs (`quantization: none`). These
-wrappers use full checkpointing for any enabled tier. With layer streaming,
-HF checkpointing stays off because the streamer already checkpoints each layer.
+wrappers use full checkpointing for any enabled tier.
 
 
 ## Kernel Auto-Composition
