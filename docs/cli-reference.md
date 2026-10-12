@@ -3463,6 +3463,7 @@ Usage: `soup ship [OPTIONS] [<command>] [ARGS]...`
 | `--config` | text |  |  | soup.yaml whose eval.ship block supplies defaults (CLI flags win). With --evidence alone it GATES (refuses evidence whose config_sha drifted from this config, or whose numerics family does not match); with --emit-evidence it STAMPS this config's provenance. |
 | `--push` | text |  |  | Post the verdict as a GitHub PR comment (owner/repo#N). Auth via GITHUB_TOKEN / GH_TOKEN; needs the `gh` CLI. |
 | `--device` | text |  |  | Device for the live run (cuda / cpu). |
+| `--chat-template-kwargs` | text |  |  | Live chat-template variables as a JSON object, e.g. {"enable_thinking":false}. |
 
 ## `soup shrink`
 
