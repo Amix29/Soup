@@ -330,7 +330,7 @@ def test_cli_dry_run_validates_native_transcript_shape(tmp_path, monkeypatch, sp
     (tmp_path / "speech.jsonl").write_text(json.dumps(speech_row(path, speaker=speaker)) + "\n")
     (tmp_path / "csm.yaml").write_text(yaml.safe_dump(csm_config().model_dump()))
     result = CliRunner().invoke(app, ["train", "-c", "csm.yaml", "--dry-run"])
-    assert result.exit_code == expected, result.output
+    assert result.exit_code == expected, (result.output, repr(result.exception))
     assert ("Ready to train" in strip_ansi(result.output)) == (expected == 0)
     if expected:
         assert "CSM train row 1" in strip_ansi(result.output)
@@ -362,7 +362,7 @@ def test_full_cli_trains_local_native_model(tmp_path, monkeypatch, tiny_csm_comp
     # accelerator choice while leaving the data/model/trainer/save paths real.
     use_cpu_cli(monkeypatch)
     result = CliRunner().invoke(app, ["train", "-c", "csm.yaml", "--yes"])
-    assert result.exit_code == 0, (result.output, result.exception)
+    assert result.exit_code == 0, (result.output, repr(result.exception))
     assert (tmp_path / "trained" / "adapter_model.safetensors").is_file()
     from transformers import CsmProcessor
 

@@ -132,7 +132,7 @@ class CSMTrainerWrapper(SFTTrainerWrapper):
         except (ImportError, OSError) as exc:
             raise RuntimeError(
                 "Native Sesame CSM needs soundfile to read audio. "
-                "Install pip install 'soup-cli[train,audio]'."
+                "Install it with: pip install 'soup-cli[train,audio]'."
             ) from exc
 
         try:
@@ -140,7 +140,7 @@ class CSMTrainerWrapper(SFTTrainerWrapper):
         except ImportError as exc:
             raise RuntimeError(
                 "Native Sesame CSM needs Transformers CsmForConditionalGeneration and "
-                "CsmProcessor. Install pip install 'soup-cli[train,audio]'."
+                "CsmProcessor. Install it with: pip install 'soup-cli[train,audio]'."
             ) from exc
         from soup_cli.utils.gpu import bf16_fp16_flags, resolve_base_load_dtype
         from soup_cli.utils.warmup import resolve_trainer_warmup_steps
@@ -201,6 +201,7 @@ class CSMTrainerWrapper(SFTTrainerWrapper):
         if cfg.experiment_name:
             output /= cfg.experiment_name
         self._output_dir = str(output)
+        # MPS evidence/limits: docs/training.md#native-sesame-csm (one tiny-model LoRA step).
         bf16, fp16 = bf16_fp16_flags(self.device, allow_mps_bf16=True)
         args = TrainingArguments(
             output_dir=self._output_dir, num_train_epochs=tcfg.epochs,

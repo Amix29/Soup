@@ -87,7 +87,7 @@ _INJECT_CALL = re.compile(r"build_loraplus_optimizer\s*\(")
 _LORAPLUS_EXEMPT = {
     "csm.py": (
         "Native CSM accepts only standard LoRA; loraplus_lr_ratio is refused at "
-        "config parse (tests/test_issue265_native_csm.py)."
+        "config parse (tests/test_native_csm.py)."
     ),
     "unlearn.py": (
         "not a Trainer subclass — runs torch.optim.AdamW directly (unlearn.py), "

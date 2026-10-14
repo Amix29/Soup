@@ -1,4 +1,4 @@
-<!-- synced-from: README.md sha256:4919f8612470131f2e5a2a1b22643e6938e497539e4e98e0b796ac760058dcd5 -->
+<!-- synced-from: README.md sha256:1532278e1092ae67f1a9fff7a5dd86357a1b0dafe77d65759fea317188c127cc -->
 <p align="center">🌍 <a href="README.md">English</a> | <strong>Türkçe</strong> | <a href="README.ar.md">العربية</a> | <a href="README.ja.md">日本語</a> | <a href="README.zh.md">中文</a></p>
 
 <p align="center">
@@ -295,15 +295,12 @@ Tam özellik başvurusu [`docs/`](docs/) içinde. Buradan başlayın:
 
 ## Veri Biçimleri
 
-Sesame CSM, metin/ses klibi çiftleri ve 32 Mimi kod kitabının tamamı için
-[yerel ses eğitimi yolunu](docs/training.md#native-sesame-csm) destekler; bu yol codec dizeleriyle TTS SFT eğitiminden ayrıdır.
-
 Alpaca, ShareGPT, ChatML, tercih çiftleri (DPO / ORPO / SimPO / IPO / KTO), görü, ses, ASR, düz
 metin, gömme (embedding), RAFT ve daha fazlası — hepsi JSONL, JSON, CSV, Parquet veya TXT'den
 otomatik algılanır; bu yüzden çoğu durumda `data.train`'i bir dosyaya yöneltirsiniz ve başka hiçbir
 şey değişmez. Her biçim için adım adım çözümlü bir örnekle şemalar ve veri ardışık düzeni (uzak URI'ler,
 akış, parçalama, iç içe geçirme, sözcük dağarcığı genişletme, belge içe aktarma)
-[`docs/data.md`](docs/data.md#data-formats) içinde.
+[`docs/data.md`](docs/data.md#data-formats) içinde; [yerel Sesame CSM ses eğitimi](docs/training.md#native-sesame-csm) ise ayrı belgelenmiştir.
 
 ## Yaygın Komutlar
 

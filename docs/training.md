@@ -2077,7 +2077,12 @@ on the backbone and depth decoder (excluding Mimi), or full fine-tuning with
 Validation loss, boolean gradient checkpointing, seeds, checkpoint resume and
 processor saving are supported. Multi-turn rows, quantization, packing,
 distributed training and additional SFT optimization knobs are refused explicitly.
-The MLX backend remains unsupported for TTS; on Apple Silicon this path uses PyTorch/MPS.
+The MLX backend remains unsupported for TTS. On Apple Silicon, contributor @Amix29
+ran `test_native_mps_training_step` with PyTorch/MPS, torch 2.13.0 and transformers
+5.16.1: one LoRA training step on a tiny randomly initialized CSM/Mimi model,
+with finite loss and a frozen codec. This is the evidence for the MPS bf16 opt-in.
+Full fine-tuning, gradient checkpointing, evaluation, resume and the pretrained
+`sesame/csm-1b` checkpoint were not run on MPS.
 
 Offline tests construct a tiny real CSM model with all 32 Mimi codebooks and
 exercise forward/backward, training, evaluation, save/reload and resume. These

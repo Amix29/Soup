@@ -558,7 +558,7 @@ jobs:
           tests/test_bugfixes.py::TestDiffModelLoading
           tests/test_issue636_torch_floor.py
           tests/test_issue265_xcodec2_audio_contract.py
-          tests/test_issue265_native_csm.py
+          tests/test_native_csm.py
           tests/test_cli_dependency_floors.py
           tests/test_click_argument_help.py
           tests/test_cli_startup_is_light.py

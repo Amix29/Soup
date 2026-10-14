@@ -1,4 +1,4 @@
-<!-- synced-from: README.md sha256:4919f8612470131f2e5a2a1b22643e6938e497539e4e98e0b796ac760058dcd5 -->
+<!-- synced-from: README.md sha256:1532278e1092ae67f1a9fff7a5dd86357a1b0dafe77d65759fea317188c127cc -->
 <p align="center">🌍 <a href="README.md">English</a> | <a href="README.tr.md">Türkçe</a> | <a href="README.ar.md">العربية</a> | <strong>日本語</strong> | <a href="README.zh.md">中文</a></p>
 
 <p align="center">
@@ -291,14 +291,11 @@ output: ./output
 
 ## データ形式
 
-Sesame CSM は、文字起こしと音声クリップのペアおよび Mimi の全 32 コードブックを扱う
-[ネイティブ音声学習パス](docs/training.md#native-sesame-csm)を提供します。コーデック文字列による TTS SFT とは別の学習方式です。
-
 Alpaca、ShareGPT、ChatML、選好ペア（DPO / ORPO / SimPO / IPO / KTO）、ビジョン、音声、ASR、プレーンテキスト、
 埋め込み、RAFT など — すべて JSONL、JSON、CSV、Parquet、TXT から自動検出されるため、ほとんどの場合は
 `data.train` をファイルに向けるだけで、他は何も変わりません。各形式の実例つきスキーマと、データパイプライン
 （リモート URI、ストリーミング、シャーディング、インターリーブ、語彙拡張、ドキュメント取り込み）は、
-[`docs/data.md`](docs/data.md#data-formats) にあります。
+[`docs/data.md`](docs/data.md#data-formats) にあり、[Sesame CSM のネイティブ音声学習](docs/training.md#native-sesame-csm)は別途説明されています。
 
 ## よく使うコマンド
 

@@ -1,4 +1,4 @@
-<!-- synced-from: README.md sha256:4919f8612470131f2e5a2a1b22643e6938e497539e4e98e0b796ac760058dcd5 -->
+<!-- synced-from: README.md sha256:1532278e1092ae67f1a9fff7a5dd86357a1b0dafe77d65759fea317188c127cc -->
 <p align="center">🌍 <a href="README.md">English</a> | <a href="README.tr.md">Türkçe</a> | <strong>العربية</strong> | <a href="README.ja.md">日本語</a> | <a href="README.zh.md">中文</a></p>
 
 <p align="center">
@@ -293,14 +293,11 @@ output: ./output
 
 ## صيغ البيانات
 
-يدعم Sesame CSM [مسار تدريب صوتي أصلي](docs/training.md#native-sesame-csm)
-لأزواج النص والمقطع الصوتي ولجميع دفاتر رموز Mimi البالغ عددها 32، بشكل منفصل عن SFT لسلاسل رموز الصوت.
-
 Alpaca وShareGPT وChatML وأزواج التفضيلات (DPO / ORPO / SimPO / IPO / KTO) والرؤية والصوت وASR والنص
 العادي والتضمين (embedding) وRAFT وغيرها — كلها تُكتشف تلقائيًا من JSONL أو JSON أو CSV أو Parquet أو TXT،
 ولذلك تكتفي في معظم الحالات بتوجيه `data.train` إلى ملف دون أن يتغير شيء آخر. وتوجد المخططات مع مثال
 عملي لكل صيغة، إضافةً إلى خط أنابيب البيانات (معرّفات URI البعيدة، والبثّ، والتقسيم إلى شظايا (sharding)، والدمج المتناوب (interleaving)، وتوسيع
-المفردات، واستيعاب المستندات)، في [`docs/data.md`](docs/data.md#data-formats).
+المفردات، واستيعاب المستندات)، في [`docs/data.md`](docs/data.md#data-formats)، مع توثيق [تدريب الصوت الأصلي لـ Sesame CSM](docs/training.md#native-sesame-csm) بشكل منفصل.
 
 ## الأوامر الشائعة
 

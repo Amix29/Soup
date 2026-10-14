@@ -113,7 +113,7 @@ class TestPrecisionPolicy:
         import soup_cli.trainer as trainer_package
 
         root = Path(trainer_package.__file__).parent
-        # CSM's real MPS training proof lives in test_issue265_native_csm.py.
+        # CSM's real MPS training proof lives in test_native_csm.py.
         expected = {"sft.py", "dpo.py", "grpo.py", "reward_model.py", "prm.py", "csm.py"}
         opted_in = {
             path.name

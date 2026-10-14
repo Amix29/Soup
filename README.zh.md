@@ -1,4 +1,4 @@
-<!-- synced-from: README.md sha256:4919f8612470131f2e5a2a1b22643e6938e497539e4e98e0b796ac760058dcd5 -->
+<!-- synced-from: README.md sha256:1532278e1092ae67f1a9fff7a5dd86357a1b0dafe77d65759fea317188c127cc -->
 <p align="center">🌍 <a href="README.md">English</a> | <a href="README.tr.md">Türkçe</a> | <a href="README.ar.md">العربية</a> | <a href="README.ja.md">日本語</a> | <strong>中文</strong></p>
 
 <p align="center">
@@ -285,14 +285,11 @@ output: ./output
 
 ## 数据格式
 
-Sesame CSM 提供[原生音频训练路径](docs/training.md#native-sesame-csm)，
-用于转录文本与音频片段配对以及全部 32 个 Mimi 码本，与基于编解码器字符串的 TTS SFT 分开。
-
 Alpaca、ShareGPT、ChatML、偏好对（DPO / ORPO / SimPO / IPO / KTO）、视觉、音频、
 ASR、纯文本、embedding、RAFT 等等——全部从 JSONL、JSON、CSV、Parquet 或 TXT 自动检测，
 所以多数情况下把 `data.train` 指向文件就行，其他什么都不用改。每种格式的 schema 和
 完整示例，加上数据管线（远程 URI、流式、分片、交错、词表扩展、文档导入），都在
-[`docs/data.md`](docs/data.md#data-formats)。
+[`docs/data.md`](docs/data.md#data-formats)，而 [Sesame CSM 原生音频训练](docs/training.md#native-sesame-csm) 则另有说明。
 
 ## 常用命令
 
