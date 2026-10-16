@@ -51,6 +51,18 @@ def test_unimplemented_dora_routes_remain_refused(overrides, training):
         )
 
 
+@pytest.mark.parametrize("task", ["grpo", "pretrain"])
+def test_non_sft_dora_is_refused_by_the_dora_task_gate(task: str) -> None:
+    # Pin the DoRA-specific refusal: the general MLX task validator must not
+    # hide a missing task gate here by rejecting the config for another reason.
+    with pytest.raises(ValidationError, match="MLX DoRA requires task='sft'"):
+        SoupConfig(
+            base="local-llama", backend="mlx", task=task,
+            data={"train": "train.jsonl"},
+            training={"quantization": "none", "lora": {"use_dora": True}},
+        )
+
+
 @pytest.mark.parametrize("option", [
     {"use_rslora": True}, {"rank_pattern": {"q_proj": 2}}, {"alpha_pattern": {"q_proj": 4}}
 ])
