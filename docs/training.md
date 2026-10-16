@@ -47,7 +47,7 @@
 - [RAFT — Retrieval-Augmented Fine-Tuning](#raft--retrieval-augmented-fine-tuning)
 - [RA-DIT — Retrieval-Augmented Dual Instruction Tuning](#ra-dit--retrieval-augmented-dual-instruction-tuning)
 - [Curriculum-Aware Training (BETA)](#curriculum-aware-training-beta)
-- [TTS Fine-Tuning (BETA, v0.52.0)](#tts-fine-tuning-beta-v0520)
+- [TTS Fine-Tuning (BETA, live in v0.71.20)](#tts-fine-tuning-tasktts-beta-live-in-v07120)
 - [Classifier / Reranker / Cross-Encoder Training (BETA, v0.52.0)](#classifier--reranker--cross-encoder-training-beta-v0520)
 - [Knowledge Distillation (BETA, v0.52.0)](#knowledge-distillation-beta-v0520)
 - [EBFT + GDPO (BETA, v0.52.0)](#ebft--gdpo-beta-v0520)
@@ -308,6 +308,13 @@ contradiction rather than something to silently ignore — and with the other tw
 decides what trains. It cannot be combined with layer streaming: streaming keeps
 the decoder on the meta device and trains only the adapter, so there would be
 nothing to full fine-tune.
+
+`task: pretrain` refuses `lora.r: 0` at config load
+([#1813](https://github.com/MakazhanAlpamys/Soup/issues/1813)): its trainer
+always attaches a LoRA adapter, so a rank of 0 would only fail inside peft when
+training starts. To train the base weights there, use LISA (`lisa_enabled: true`),
+which trains a rotating set of whole layers without an adapter and so still
+accepts `lora.r: 0`, or switch to `task: sft`.
 
 `freeze_layers` / `freeze_ratio` **do** stay legal with `r: 0` — "train
 everything above layer N" is a real technique — and the trainer respects
@@ -1890,7 +1897,7 @@ score = score_citations(
 # CitationScore(precision=1.0, recall=1.0, f1=1.0, predicted_count=1, expected_count=1)
 ```
 
-Citation-faithful FT is gated to `task in {sft, pretrain}` + `data.format='raft'` — misconfigured runs fail at config load with a named-field message.
+Citation-faithful FT requires `task: sft` + `data.format: raft` — misconfigured runs fail at config load with a named-field message. The pretrain trainer does not apply citation span weights and refuses `training.citation_faithful: true`.
 
 Under the hood, a `format: raft` run trains **answer-only**: each row is composed into a prompt (golden + distractor docs, shuffled deterministically by `data.raft_shuffle_seed`, each labelled `[doc-N]`) followed by the answer; the prompt span is masked out of the loss and — when `citation_faithful: true` — the bracketed `[doc-id]` spans in the answer get a boosted per-token loss weight. Rows whose prompt fills `max_length` (answer fully truncated) are dropped with a warning rather than silently shrinking the dataset.
 
@@ -2184,8 +2191,9 @@ the trained router, see `soup serve --mole` in [Serving and Export](serving-and-
 
 ## Architecture Knobs — Mixture-of-Depths, LLaMA Pro, LongLoRA
 
-Two architecture transforms that were schema-only are now live for SFT / Pretrain on
-Llama / Qwen / Mistral. Both apply at trainer setup:
+Two architecture transforms that were schema-only are now live on Llama / Qwen / Mistral:
+Mixture-of-Depths on SFT and pretrain, LLaMA Pro on SFT only
+([#1813](https://github.com/MakazhanAlpamys/Soup/issues/1813)). Both apply at trainer setup:
 
 ```yaml
 training:

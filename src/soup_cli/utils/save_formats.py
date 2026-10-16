@@ -1,6 +1,6 @@
 """v0.53.0 Part F + v0.53.1 #142 — Advanced save / merge formats.
 
-Two new save-format surfaces ship this release (schema-only):
+Two save-format surfaces:
 
 * ``soup merge --save-format <fmt>`` where fmt ∈ {fp16, 4bit, 4bit_forced}.
   ``4bit`` writes a single BNB-4bit-quantized merged checkpoint without
@@ -11,7 +11,8 @@ Two new save-format surfaces ship this release (schema-only):
   ``Int4WeightOnly`` / ``Int8DynActInt4`` / ``Float8DynActFloat8`` /
   ``NVFP4`` PTQ schemes (unsloth + axolotl parity).
 
-Live wiring deferred to v0.53.1.
+Both are live: ``soup merge`` calls :func:`merge_4bit` and ``soup export --format
+torchao`` calls :func:`export_torchao`.
 """
 
 from __future__ import annotations
@@ -191,7 +192,9 @@ def validate_quant_config_path(path: object) -> str:
     * ``os.path.realpath`` + ``os.path.commonpath`` cwd containment
     * ``os.lstat`` + ``stat.S_ISLNK`` rejection before any ``open()``
     * existence + extension check (``.yaml`` / ``.yml``)
-    * ``yaml.safe_load`` only.
+    * read through ``utils.yaml_limits.load_yaml_file_limited`` (``yaml.safe_load``
+      under the shared size, nesting and expansion limits), never a bare
+      ``yaml.safe_load``.
     """
     if isinstance(path, bool):
         raise TypeError(f"quant_config must not be bool, got {path!r}")
@@ -232,7 +235,9 @@ def load_quant_config(path: object) -> Mapping[str, Any]:
     * ``os.path.realpath`` + ``os.path.commonpath`` cwd containment
     * ``os.lstat + stat.S_ISLNK`` rejection (TOCTOU)
     * Extension allowlist (``.yaml`` / ``.yml``)
-    * ``yaml.safe_load`` only
+    * Read through ``utils.yaml_limits.load_yaml_file_limited`` (``yaml.safe_load``
+      under the shared nesting and expansion limits; the size cap below is its
+      ``max_bytes``)
     * 256 KB size cap
     """
     from soup_cli.utils.yaml_limits import load_yaml_file_limited

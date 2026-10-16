@@ -346,6 +346,9 @@ Comment on it saying you are taking it. GitHub only lets us set the formal
 assignee badge for repo collaborators, so the comment **is** the claim — it will
 look unassigned either way, and we treat the thread as the record.
 
+The current board is the pinned issue
+[#1945](https://github.com/MakazhanAlpamys/Soup/issues/1945), regenerated daily.
+
 Two commitments in return:
 
 - **If a maintainer ends up doing the work instead, you get told, in the thread,
@@ -375,7 +378,13 @@ released as a penalty.
   requests are not closed: a comment says what they wait behind, and they may be
   converted to drafts. Mark one ready for review when another lands.
 - **Claims.** Hold at most 2 claims whose pull request is not open yet. A comment without
-  a plan is read as a question, not as a claim.
+  a plan is read as a question, not as a claim. A claim that is blocked on another issue
+  (`infra-blocked`, or "lands after #N" in the thread) does not take one of the two slots,
+  and neither does a claim whose pull request is open and waiting only for the merge line.
+- **Regression tests.** A bug-fix pull request carries a test that fails on `main` without
+  the fix; the review checks that, and checks that undoing the fix makes the test fail.
+  Merged pull requests that meet this get the `regression-test` label, visible in the
+  pull-request list.
 - **A quiet claim.** With no pull request and no word from you for 7 days, you get a
   friendly check-in in the thread. If another 7 days pass without an answer, the claim is
   released with a comment. Nothing you wrote is lost, and you can take it back.
@@ -392,6 +401,32 @@ Maintainers rate every triaged issue from 1 to 10 with a `difficulty:N` label, s
 something that fits your time and experience. How the number is chosen and what each level
 means is in [docs/issue-difficulty.md](docs/issue-difficulty.md). When you open an issue you
 can suggest a difficulty in the form; the maintainer sets the final one.
+
+### Maintained areas
+
+Contributors with 3 or more merged pull requests can hold an area: a part of the project to
+own end to end, from triage to the last follow-up. An area has an `area:<name>` label and a
+tracker issue that lists its open items. Holding an area means:
+
+- **First refusal on new issues.** When a maintainer triages an issue with the area's label,
+  the holder is pinged, and the issue stays with them for 3 days before it is open to anyone.
+- **A higher open-pull-request line.** Inside the area the limit from
+  [How work is queued](#how-work-is-queued) is two higher than your usual one.
+- **No new powers.** The holder is a contributor, not a maintainer: reviews and merges stay
+  with the maintainers.
+
+An area is released the way a claim is: after 14 quiet days you get a check-in in the tracker
+issue, and if another 7 days pass without an answer it is released with a comment. You can
+take it back.
+
+| Holder | Area | Label |
+|--------|------|-------|
+| @kok-o | Data pipeline and traces | `area:data` |
+| @Nari-Ab | CLI and help text | `area:cli` |
+| @ybai08 | ReLoRA, preference training and layer streaming | `area:training` |
+| @taljeon | Eval gate | `area:eval` |
+| @akkupratap323 | Ingest and feedback sources | `area:ingest` |
+| @dryn85-max | The MLX backend (maintainer's exception: named ahead of the threshold, held from the first merge) | `area:mlx` |
 
 ## Making Changes
 
@@ -468,6 +503,8 @@ When you open a PR, the GitHub template will show this checklist:
 - [ ] Updated relevant docs (`README.md` and the matching page under `docs/`) if needed
 - [ ] New tests added for new functionality
 - [ ] No breaking changes (or documented in PR description)
+
+Contributions are accepted under the Apache License, Version 2.0, the project's own terms (section 5 of the license): by opening a pull request you agree that your contribution is licensed that way and you keep your copyright; there is no CLA and no DCO sign-off for now.
 
 ## Architecture & Design Decisions
 

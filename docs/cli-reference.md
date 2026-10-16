@@ -2332,7 +2332,7 @@ Usage: `soup export [OPTIONS]`
 | Name | Type | Default | Required | Help |
 |---|---|---|---|---|
 | `--model`, `-m` | text |  | yes | Path to model directory (full model or LoRA adapter) |
-| `--format`, `-f` | text | `gguf` |  | Export format: gguf, onnx, tensorrt, awq, gptq, bitnet, tq1_0 (awq and gptq are deprecated and will be removed in Soup v0.77) |
+| `--format`, `-f` | text | `gguf` |  | Export format: gguf, onnx, tensorrt, awq, gptq, bitnet, tq1_0, torchao, gguf-ud (torchao needs --quant-config; awq and gptq are deprecated and will be removed in Soup v0.77) |
 | `--quant`, `-q` | text | `q4_k_m` |  | Quantization type: q4_0, q4_k_m, q5_k_m, q8_0, f16, f32 |
 | `--output`, `-o` | text |  |  | Output file path. Default: &lt;model-name>.&lt;quant>.gguf |
 | `--base`, `-b` | text |  |  | Base model ID (for LoRA adapters). Auto-detected if not set. |
@@ -2691,6 +2691,7 @@ Usage: `soup loop init [OPTIONS] SERVED_MODEL`
 | `--monthly-budget` | text |  |  | Monthly USD cap (e.g. 50usd, 100). |
 | `--max-runs-per-day` | integer |  |  | Cap on iteration starts per UTC day. |
 | `--pre-wired` | flag | off |  | Use the pre-wired harvest/train/gate/deploy stages (utils/loop_stages.py) on watch instead of no-op stubs (v0.71.4). |
+| `--thumbs-db` | text |  |  | Local-RL SQLite written by `soup serve --record-thumbs`; the pre-wired harvest turns its thumbs into preference pairs. Must stay under cwd. SOUP_LOOP_THUMBS_DB overrides it. |
 | `--force` | flag | off |  | Overwrite existing loop.yaml. |
 
 ### `soup loop pause`
@@ -3228,6 +3229,7 @@ Usage: `soup registry push [OPTIONS]`
 | `--name`, `-n` | text |  | yes | Registry entry name |
 | `--tag`, `-t` | text | `v1` |  | Tag (e.g. v1, prod-2024) |
 | `--notes` | text | `""` |  | Free-form notes |
+| `--data` | text |  |  | Training data file to record: its SHA-256 is stored as data_hash. This is the file registered as the training input, not proof of what the run trained on. Must be a file under the current directory. |
 
 ### `soup registry search`
 
@@ -3443,7 +3445,7 @@ Usage: `soup serve [OPTIONS]`
 | `--bank-strength` | float | `1.0` |  | Vector-bank delta strength multiplier. Ignored when --bank is unset. |
 | `--mole` | text |  |  | Path to a MoLE training output dir (mole_gate.pt + mole_manifest.json). Serves the base + N frozen task LoRAs with per-token gate blending at decode time. Requires --backend transformers; not combinable with --bank / --steer / --adapters. (v0.71.17 #259) |
 | `--kv-cache-type` | text |  |  | KV-cache type for decoding: q8_0 (8-bit quantized, needs hqq) / bf16 / f16 (cache dtype) / fp8 (vLLM+Hopper only). Transformers backend only — vLLM / SGLang routing is in the blocked tail. v0.71.14 (#140). |
-| `--tool-auth-token` | text |  |  | Require 'Authorization: Bearer &lt;token>' on the code-exec tool endpoints (/v1/tools/python, /v1/tools/web_search). Strongly recommended whenever --host is not loopback, since those endpoints run caller-supplied Python in a best-effort sandbox. |
+| `--tool-auth-token` | text |  |  | Require 'Authorization: Bearer &lt;token>' on the code-exec tool endpoints (/v1/tools/python, /v1/tools/bash, /v1/tools/web_search). Strongly recommended whenever --host is not loopback, since those endpoints run caller-supplied Python in a best-effort sandbox. |
 
 ## `soup ship`
 
