@@ -138,6 +138,13 @@ training:
 
 MLX backend supports SFT, DPO and ORPO. Any other task with `backend: mlx` (`grpo`, `ipo`, `kto`, `simpo`, `preference`, ...) is refused when the config is loaded, with an error naming the task. Requires `mlx-lm >= 0.31.3`. Use `soup recipes search mlx` for ready-made Apple Silicon configs.
 
+MLX LoRA+ text SFT uses two native AdamW groups: A at the configured update-based
+schedule, B at `training.loraplus_lr_ratio` times it. One global clipping pass
+precedes routing; accumulation does not advance schedules between updates.
+Dense/4-bit linear ordinary LoRA/rsLoRA are qualified; DoRA and per-module
+patterns are refused together with LoRA+. Metadata records the effective rates.
+See [LoRA+](peft-and-efficiency.md#lora-differentiated-learning-rates).
+
 #### DPO on MLX
 
 `task: dpo` with `backend: mlx` runs Soup's own training loop (`mlx-lm` ships no DPO helper), with the sigmoid loss TRL uses by default and `training.dpo_beta`.

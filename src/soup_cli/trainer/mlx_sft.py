@@ -561,6 +561,10 @@ class MLXSFTTrainerWrapper:
                 "[yellow]MLX backend: target_modules: auto cannot be resolved for "
                 f"all architectures; defaulting to {target_keys}[/]"
             )
+        if cfg.training.loraplus_lr_ratio is not None:
+            from soup_cli.trainer.mlx_lora import selected_linear_modules
+
+            selected_linear_modules(model, target_keys)
         keys = set(target_keys)
         use_dora = bool(lora_cfg.use_dora)
         if use_dora:
@@ -877,9 +881,30 @@ class MLXSFTTrainerWrapper:
         # one that clips the global gradient norm before delegating. Applied
         # here rather than inside build_optimizer so the plan stays a pure
         # description of the schedule and the two fixes stay separable.
-        optimizer = _clipping_optimizer(
-            build_optimizer(optimizer_plan), float(cfg.training.max_grad_norm)
-        )
+        if cfg.training.loraplus_lr_ratio is not None:
+            from soup_cli.trainer.mlx_loraplus import build_loraplus_optimizer
+
+            native_optimizer = build_loraplus_optimizer(
+                optimizer_plan, self.model, cfg.training.loraplus_lr_ratio,
+            )
+        else:
+            native_optimizer = build_optimizer(optimizer_plan)
+        optimizer = _clipping_optimizer(native_optimizer, float(cfg.training.max_grad_norm))
+
+        optimizer_metadata = optimizer_plan.as_metadata()
+        if cfg.training.loraplus_lr_ratio is not None:
+            from soup_cli.trainer.mlx_lora import write_pattern_metadata
+
+            optimizer_metadata.update(
+                loraplus_lr_ratio=cfg.training.loraplus_lr_ratio,
+                peak_lr_a=optimizer_plan.peak_lr,
+                peak_lr_b=optimizer_plan.peak_lr * cfg.training.loraplus_lr_ratio,
+                schedule_unit="optimizer updates",
+            )
+            write_pattern_metadata(output_dir, build_mlx_adapter_config(
+                cfg.training.lora, adapter_path=str(output_dir), model=str(cfg.base),
+                num_layers=len(self.model.layers), **optimizer_metadata,
+            ))
 
         captured: dict = {}
         total_epochs = float(cfg.training.epochs)
@@ -1219,7 +1244,7 @@ class MLXSFTTrainerWrapper:
             "grad_accumulation_steps": grad_accumulation_steps,
             # #686: the EFFECTIVE optimizer and schedule, so an adapter
             # records the recipe that ran rather than the one requested.
-            **optimizer_plan.as_metadata(),
+            **optimizer_metadata,
             # #749: the norm gradients were actually clipped at.
             # Recorded because MLX honours it through a Soup-side
             # wrapper rather than through anything mlx-lm writes, so
@@ -1227,7 +1252,7 @@ class MLXSFTTrainerWrapper:
             # whether it clipped.
             "max_grad_norm": float(cfg.training.max_grad_norm),
         }
-        if pattern_metadata is not None:
+        if pattern_metadata is not None or cfg.training.loraplus_lr_ratio is not None:
             write_pattern_metadata(output_dir, adapter_metadata)
         else:
             (output_dir / "adapter_config.json").write_text(json.dumps(adapter_metadata, indent=2))

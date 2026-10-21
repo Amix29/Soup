@@ -11,6 +11,8 @@ on:
       - 'src/soup_cli/config/**'
       - 'src/soup_cli/commands/infer.py'
       - 'src/soup_cli/commands/merge.py'
+      - 'tests/test_mlx_loraplus.py'
+      - 'tests/test_mlx_loraplus_native.py'
       - 'tests/test_mlx_patterns.py'
       - 'tests/test_mlx_patterns_native.py'
       - 'tests/test_mlx_generation.py'
@@ -68,5 +70,6 @@ jobs:
           HF_DATASETS_OFFLINE: '1'
           PYTHONPATH: src
         run: >-
-          pytest -o addopts= -q tests/test_mlx_patterns.py tests/test_mlx_patterns_native.py
+          pytest -o addopts= -q tests/test_mlx_loraplus.py tests/test_mlx_loraplus_native.py
+          tests/test_mlx_patterns.py tests/test_mlx_patterns_native.py
           tests/test_mlx_generation.py tests/test_mlx_merge.py tests/test_mlx_dora_native.py
