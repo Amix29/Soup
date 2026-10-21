@@ -7,6 +7,24 @@ from dataclasses import replace
 from typing import Any
 
 
+def check_loraplus_output(output: Any, metadata: dict) -> None:
+    """Preserve existing weights when their reconstruction recipe differs."""
+    import json
+
+    if not any(output.glob("*adapters.safetensors")):
+        return
+    try:
+        previous = json.loads((output / "adapter_config.json").read_text())
+        fields = ("fine_tune_type", "lora_parameters", "model", "num_layers", "soup_lora")
+        if isinstance(previous, dict) and all(
+            previous.get(key) == metadata.get(key) for key in fields
+        ):
+            return
+    except (OSError, ValueError):
+        pass
+    raise ValueError("MLX LoRA+ requires a fresh output directory for a different adapter recipe")
+
+
 def build_loraplus_optimizer(plan: Any, model: Any, ratio: float) -> Any:
     """Route only complete linear A/B pairs; clip the whole tree at the caller."""
     import mlx.optimizers as optim

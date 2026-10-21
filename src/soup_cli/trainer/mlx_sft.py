@@ -894,6 +894,7 @@ class MLXSFTTrainerWrapper:
         optimizer_metadata = optimizer_plan.as_metadata()
         if cfg.training.loraplus_lr_ratio is not None:
             from soup_cli.trainer.mlx_lora import write_pattern_metadata
+            from soup_cli.trainer.mlx_loraplus import check_loraplus_output
 
             optimizer_metadata.update(
                 loraplus_lr_ratio=cfg.training.loraplus_lr_ratio,
@@ -901,10 +902,12 @@ class MLXSFTTrainerWrapper:
                 peak_lr_b=optimizer_plan.peak_lr * cfg.training.loraplus_lr_ratio,
                 schedule_unit="optimizer updates",
             )
-            write_pattern_metadata(output_dir, build_mlx_adapter_config(
+            plus_metadata = build_mlx_adapter_config(
                 cfg.training.lora, adapter_path=str(output_dir), model=str(cfg.base),
                 num_layers=len(self.model.layers), **optimizer_metadata,
-            ))
+            )
+            check_loraplus_output(output_dir, plus_metadata)
+            write_pattern_metadata(output_dir, plus_metadata)
 
         captured: dict = {}
         total_epochs = float(cfg.training.epochs)

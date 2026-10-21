@@ -305,3 +305,38 @@ def test_gradient_routing_rejects_unknown_tensor_after_valid_construction():
     with pytest.raises(ValueError, match="exactly.*A/B"):
         optimizer.update(model, gradients)
     assert int(optimizer.step.item()) == 0
+
+
+@pytest.mark.parametrize("change", ["rank", "scale", "targets", "model", "missing_metadata"])
+def test_existing_output_preserves_checkpoint_on_recipe_change(tmp_path, monkeypatch, change):
+    monkeypatch.chdir(tmp_path)
+    base = _base(tmp_path / "base")
+    cfg = _config(base, tmp_path / "adapter", dora=False)
+    cfg.training.loraplus_lr_ratio = 2
+    rows = {"train": [{"text": "alpha beta gamma alpha"}] * 2}
+
+    def run(config):
+        wrapper = MLXSFTTrainerWrapper(config)
+        wrapper.setup(rows)
+        wrapper.train()
+
+    run(cfg)
+    # Compatible reuse remains supported, including a changed learning-rate ratio.
+    cfg.training.loraplus_lr_ratio = 16
+    run(cfg)
+    output = tmp_path / "adapter"
+    changed = cfg.model_copy(deep=True)
+    if change == "rank":
+        changed.training.lora.r = 2
+    elif change == "scale":
+        changed.training.lora.alpha = 16
+    elif change == "targets":
+        changed.training.lora.target_modules = ["self_attn.v_proj"]
+    elif change == "model":
+        changed.base = str(_base(tmp_path / "other-base"))
+    else:
+        (output / "adapter_config.json").unlink()
+    before = {p.name: p.read_bytes() for p in output.iterdir() if p.is_file()}
+    with pytest.raises(ValueError, match="fresh output directory"):
+        run(changed)
+    assert {p.name: p.read_bytes() for p in output.iterdir() if p.is_file()} == before
