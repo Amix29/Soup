@@ -2097,7 +2097,9 @@ def train(
             f"{merge_hint}\n"
             f"Export GGUF: [bold]soup export --model {result['output_dir']}[/]\n"
             f"Run details: [bold]soup runs show {run_id}[/]",
-            title="[bold green]Training Complete![/]",
+            title=("[bold yellow]Training Stopped — Loss watchdog[/]"
+                   if result.get("stop_reason") == "loss_watchdog"
+                   else "[bold green]Training Complete![/]"),
         )
     )
 

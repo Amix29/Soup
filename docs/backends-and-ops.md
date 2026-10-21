@@ -119,6 +119,12 @@ Soup triggers each evaluation when mlx-lm asks for the next training batch,
 which mlx-lm 0.31 and 0.32 do only after the previous step; if a release reads
 batches ahead, the run says once that the evaluation ran before its update.
 
+MLX text SFT also supports the opt-in [loss watchdog](peft-and-efficiency.md#loss-watchdog)
+with the existing threshold and patience fields. Its reports count completed
+optimizer updates; a triggering report stops further updates and saves the last
+adapter with the actual completed work and termination reason in
+`adapter_config.json`. Recovery and watchdogs on preference tasks remain refused.
+
 ```yaml
 base: mlx-community/Llama-3.2-3B-Instruct-4bit
 task: sft
