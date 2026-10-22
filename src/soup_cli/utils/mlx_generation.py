@@ -95,21 +95,42 @@ def load_native_model(
     """Load a base and strictly apply every saved ordinary linear LoRA tensor."""
     path = Path(model_path)
     config = read_native_adapter(path, base_model)
-    import mlx.core as mx
-    import mlx.nn as nn
-    from mlx.utils import tree_flatten
-    from mlx_lm import load
-    from mlx_lm.tuner.utils import linear_to_lora_layers
+    from rich.console import Console
+
+    from soup_cli.utils.trust_remote import (
+        model_requires_trust_remote_code,
+        resolve_trust_remote_code,
+    )
+
+    base = config["model"] if config else model_path
+    trust_remote_code = resolve_trust_remote_code(
+        base, requested=trust_remote_code, console=Console(),
+        requires_remote_code=bool(model_requires_trust_remote_code(base)),
+    )
+    try:
+        import mlx.core as mx
+        import mlx.nn as nn
+        from mlx.utils import tree_flatten
+        from mlx_lm import load
+        from mlx_lm.tuner.utils import linear_to_lora_layers
+    except ImportError as exc:
+        raise ImportError(
+            "Native MLX generation requires soup-cli[mlx]; install it on Apple Silicon."
+        ) from exc
 
     # 0.31.3 accepts tokenizer trust but predates custom architecture loading;
     # newer releases additionally require an explicit architecture trust flag.
     trust = ({"trust_remote_code": trust_remote_code}
              if "trust_remote_code" in inspect.signature(load).parameters else {})
     model, tokenizer, base_config = load(
-        config["model"] if config else model_path,
+        base,
         tokenizer_config={"trust_remote_code": trust_remote_code},
         return_config=True, **trust,
     )
+    # MLX-LM 0.31.3 replaces tokenizer EOS with model EOS; retain both as newer
+    # versions do. Use the declared ID, never a guessed control-token string.
+    if tokenizer.eos_token_id is not None:
+        tokenizer.add_eos_token(str(tokenizer.eos_token_id))
     if base_config.get("vision_config") or base_config.get("audio_config") or any(
         "Classification" in architecture or "Embedding" in architecture
         for architecture in base_config.get("architectures", [])
@@ -134,7 +155,12 @@ def load_native_model(
         model.freeze()
         linear_to_lora_layers(model, config["num_layers"], config["lora_parameters"])
         expected = dict(tree_flatten(model.trainable_parameters()))
-        weights = mx.load(str(path / "adapters.safetensors"))
+        try:
+            weights = mx.load(str(path / "adapters.safetensors"))
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise ValueError(
+                "Cannot read native MLX adapter weights in adapters.safetensors"
+            ) from exc
         if not expected or weights.keys() != expected.keys() or any(
             weights[name].shape != expected[name].shape for name in weights.keys() & expected
         ):
