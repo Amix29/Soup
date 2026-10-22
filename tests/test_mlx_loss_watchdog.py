@@ -218,6 +218,20 @@ def test_failed_final_save_propagates_and_releases_recorder_and_display(loop, mo
     assert not (Path(loop.wrapper.config.output) / "adapter_config.json").exists()
 
 
+def test_failing_recorder_finish_still_releases_the_display(loop, monkeypatch):
+    from soup_cli.trainer import mlx_sft
+
+    def failing_finish():
+        raise OSError("recorder finish failed")
+
+    recorder = SimpleNamespace(wrap=lambda rows: rows, loss=object(), finish=failing_finish)
+    monkeypatch.setattr(mlx_sft, "_start_rewind", lambda **kwargs: recorder)
+    loop.wrapper.config.training.rewind_log = True
+    with pytest.raises(OSError, match="recorder finish failed"):
+        loop.wrapper.train(display=loop.display)
+    assert loop.stopped
+
+
 @pytest.mark.parametrize("iteration, updates, diagnostic", [
     (1, 0, "not at an optimizer boundary"),
     (2, 0, "precedes its optimizer update"),
