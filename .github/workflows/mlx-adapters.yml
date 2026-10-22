@@ -11,6 +11,9 @@ on:
       - 'src/soup_cli/config/**'
       - 'src/soup_cli/commands/infer.py'
       - 'src/soup_cli/commands/merge.py'
+      - 'tests/_lorafa_peft_reference.py'
+      - 'tests/test_mlx_lorafa.py'
+      - 'tests/test_mlx_lorafa_native.py'
       - 'tests/test_mlx_patterns.py'
       - 'tests/test_mlx_patterns_native.py'
       - 'tests/test_mlx_generation.py'
@@ -68,5 +71,14 @@ jobs:
           HF_DATASETS_OFFLINE: '1'
           PYTHONPATH: src
         run: >-
-          pytest -o addopts= -q tests/test_mlx_patterns.py tests/test_mlx_patterns_native.py
+          pytest -o addopts= -q tests/test_mlx_lorafa.py tests/test_mlx_lorafa_native.py
+          tests/test_mlx_patterns.py tests/test_mlx_patterns_native.py
           tests/test_mlx_generation.py tests/test_mlx_merge.py tests/test_mlx_dora_native.py
+      - name: Compare the pinned CPU reference in a separate environment
+        env:
+          HF_HUB_OFFLINE: '1'
+          PYTHONPATH: src
+        run: |
+          python -m venv .peft-reference
+          .peft-reference/bin/python -m pip install 'peft==0.21.2' ${{ github.event_name == 'pull_request' && '-c .github/constraints/pinned-upstream.txt' || '' }}
+          SOUP_PEFT_REFERENCE_PYTHON="$PWD/.peft-reference/bin/python" pytest -o addopts= -q tests/test_mlx_lorafa_native.py -k actual_pinned_peft_cpu_reference

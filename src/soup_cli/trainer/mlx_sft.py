@@ -403,10 +403,6 @@ class MLXSFTTrainerWrapper:
             unsupported.append("quantization=8bit (use mlx-community 4bit models)")
         if tcfg.use_galore:
             unsupported.append("GaLore")
-        if getattr(tcfg, "use_lorafa", False):
-            unsupported.append(
-                "training.use_lorafa (LoRA-FA has no MLX implementation)"
-            )
         if tcfg.use_ring_attention:
             unsupported.append("Ring Attention")
         if tcfg.use_flash_attn:
@@ -561,6 +557,10 @@ class MLXSFTTrainerWrapper:
                 "[yellow]MLX backend: target_modules: auto cannot be resolved for "
                 f"all architectures; defaulting to {target_keys}[/]"
             )
+        if cfg.training.use_lorafa:
+            from soup_cli.trainer.mlx_lora import selected_linear_modules
+
+            selected_linear_modules(model, target_keys)
         keys = set(target_keys)
         use_dora = bool(lora_cfg.use_dora)
         if use_dora:
@@ -640,6 +640,11 @@ class MLXSFTTrainerWrapper:
         metadata_path = Path(checkpoint_path).parent / "adapter_config.json"
         if metadata_path.is_file() and "soup_lora" in json.loads(metadata_path.read_text()):
             raise ValueError("MLX per-module warm-start requires matching rank/alpha patterns")
+        if self.config.training.use_lorafa:
+            from soup_cli.trainer.mlx_lorafa import load_fa_checkpoint
+
+            load_fa_checkpoint(self.model, checkpoint_path)
+            return
         tensor_count = _count_safetensors_tensors(checkpoint_path)
         if tensor_count == 0:
             raise ValueError(
@@ -877,11 +882,27 @@ class MLXSFTTrainerWrapper:
         # one that clips the global gradient norm before delegating. Applied
         # here rather than inside build_optimizer so the plan stays a pure
         # description of the schedule and the two fixes stay separable.
-        optimizer = _clipping_optimizer(
-            build_optimizer(optimizer_plan), float(cfg.training.max_grad_norm)
-        )
+        if cfg.training.use_lorafa:
+            from soup_cli.trainer.mlx_lorafa import build_lorafa_optimizer, train_lorafa
+
+            native_optimizer = build_lorafa_optimizer(optimizer_plan, self.model)
+            train = train_lorafa
+        else:
+            native_optimizer = build_optimizer(optimizer_plan)
+        optimizer = _clipping_optimizer(native_optimizer, float(cfg.training.max_grad_norm))
 
         captured: dict = {}
+        fa_metadata = None
+        if cfg.training.use_lorafa:
+            from soup_cli.trainer.mlx_lora import write_pattern_metadata
+            from soup_cli.trainer.mlx_lorafa import SETTINGS, check_fa_output
+
+            fa_metadata = build_mlx_adapter_config(
+                cfg.training.lora, adapter_path=str(output_dir), model=str(cfg.base),
+                num_layers=len(self.model.layers), lorafa=SETTINGS,
+            )
+            check_fa_output(output_dir, fa_metadata)
+            write_pattern_metadata(output_dir, fa_metadata)
         total_epochs = float(cfg.training.epochs)
 
         class _Callback(TrainingCallback):
@@ -1220,6 +1241,8 @@ class MLXSFTTrainerWrapper:
             # #686: the EFFECTIVE optimizer and schedule, so an adapter
             # records the recipe that ran rather than the one requested.
             **optimizer_plan.as_metadata(),
+            **({"lorafa": SETTINGS, "optimizer": "LoRAFAProjectedAdamW"}
+               if fa_metadata is not None else {}),
             # #749: the norm gradients were actually clipped at.
             # Recorded because MLX honours it through a Soup-side
             # wrapper rather than through anything mlx-lm writes, so
@@ -1227,7 +1250,7 @@ class MLXSFTTrainerWrapper:
             # whether it clipped.
             "max_grad_norm": float(cfg.training.max_grad_norm),
         }
-        if pattern_metadata is not None:
+        if pattern_metadata is not None or fa_metadata is not None:
             write_pattern_metadata(output_dir, adapter_metadata)
         else:
             (output_dir / "adapter_config.json").write_text(json.dumps(adapter_metadata, indent=2))
