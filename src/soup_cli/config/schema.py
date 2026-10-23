@@ -5199,6 +5199,36 @@ def _data_may_carry_its_own_validation_split(data: "DataConfig") -> bool:
     return any(_classify_data_train_entry(entry) == "hub" for entry in entries)
 
 
+def _unapplied_lora_patterns_message(
+    lora: "LoraConfig", backend: str, how: str
+) -> Optional[str]:
+    """#1996, #2153 - the refusal text for ``lora.rank_pattern`` /
+    ``lora.alpha_pattern`` on a backend that builds every adapter from one scalar
+    ``lora.r`` and ``lora.alpha``, or ``None`` when neither field is set.
+
+    ``how`` is the clause that says why the backend drops them ("the MLX trainer
+    builds every adapter from"). The text names only the fields the config set; an
+    empty ``{}`` sets nothing (``peft_wiring`` reads ``if rank_pattern:``), so it
+    is not named and does not refuse. One builder serves the MLX and unsloth
+    validators so the two messages cannot drift; each validator stays separate so
+    the day one backend honours the patterns only that validator is deleted.
+    """
+    set_fields = [
+        f"training.lora.{name}"
+        for name in ("rank_pattern", "alpha_pattern")
+        if getattr(lora, name)
+    ]
+    if not set_fields:
+        return None
+    names = " and ".join(set_fields)
+    verb = "are" if len(set_fields) > 1 else "is"
+    return (
+        f"{names} {verb} not applied by backend: {backend} — {how} one scalar "
+        "training.lora.r and training.lora.alpha, so per-module ranks and alphas "
+        f"would be dropped. Remove {names}, or use backend: transformers."
+    )
+
+
 class SoupConfig(BaseModel):
     """Root config for soup.yaml."""
 
@@ -8644,28 +8674,53 @@ class SoupConfig(BaseModel):
         for plain LoRA; defined after :meth:`_validate_mlx_task_support` (and the
         ``lora.r=0`` check) on purpose, so a task MLX cannot run, or a config with no
         adapter at all, is refused for that reason first and "use backend:
-        transformers" below always leads to a config that loads. MLX DoRA already
+        transformers" below leads to a config that loads for the pattern. It is not
+        unconditional: an MLX-only setting such as ``training.optimizer: muon`` or
+        ``adamw_hf`` is refused on transformers for its own reason. MLX DoRA already
         refuses both fields in its own words, earlier. An empty ``{}`` sets nothing
         (``peft_wiring`` reads ``if rank_pattern:``) and still loads.
         """
         if self.backend != "mlx":
             return self
-        lcfg = self.training.lora
-        set_fields = [
-            f"training.lora.{name}"
-            for name in ("rank_pattern", "alpha_pattern")
-            if getattr(lcfg, name)
-        ]
-        if not set_fields:
-            return self
-        names = " and ".join(set_fields)
-        verb = "are" if len(set_fields) > 1 else "is"
-        raise ValueError(
-            f"{names} {verb} not applied by backend: mlx — the MLX trainer builds every "
-            "adapter from one scalar training.lora.r and training.lora.alpha, so "
-            f"per-module ranks and alphas would be dropped. Remove {names}, or use "
-            "backend: transformers."
+        message = _unapplied_lora_patterns_message(
+            self.training.lora, "mlx", "the MLX trainer builds every adapter from"
         )
+        if message is not None:
+            raise ValueError(message)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_unsloth_lora_patterns(self) -> "SoupConfig":
+        """#2153 - ``lora.rank_pattern`` / ``alpha_pattern`` are not applied on
+        ``backend: unsloth``. Stop-gap: delete this validator (and
+        ``tests/test_unsloth_lora_pattern_refusal.py``) when the unsloth loader honours
+        them; it is independent of :meth:`_validate_mlx_lora_patterns`.
+
+        Every ``_setup_unsloth`` goes through ``utils/unsloth.py:load_model_and_tokenizer``,
+        which hands ``FastLanguageModel.get_peft_model`` one scalar ``r`` and
+        ``lora_alpha`` and has no pattern parameter, so a config that set one trained a
+        uniform-rank adapter without a word. The refusal is limited to the configs it
+        is the right answer for. A task outside :data:`UNSLOTH_SETUP_TASKS` is skipped:
+        it has no unsloth setup, and :meth:`_validate_unsloth_has_a_setup` (last in the
+        class, so ``distill``, ``asr`` and ``online_dpo`` keep their own earlier
+        refusals) says so in the words that fix it. SFT with a non-text modality is
+        skipped too: it loads through transformers, which applies the patterns, and
+        :meth:`_validate_unsloth_sft_modality` (defined later) names the real problem.
+        ``lora.r=0`` is refused for unsloth earlier still. An empty ``{}`` sets nothing
+        and still loads.
+        """
+        if self.backend != "unsloth":
+            return self
+        if self.task not in UNSLOTH_SETUP_TASKS:
+            return self
+        if self.task == "sft" and self.modality != "text":
+            return self
+        message = _unapplied_lora_patterns_message(
+            self.training.lora, "unsloth", "the unsloth loader attaches every adapter from"
+        )
+        if message is not None:
+            raise ValueError(message)
+        return self
 
     @model_validator(mode="after")
     def _validate_uld_compat(self) -> "SoupConfig":

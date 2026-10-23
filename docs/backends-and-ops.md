@@ -418,6 +418,8 @@ Works with the tasks that have an unsloth setup: SFT (text; SFT vision and audio
 
 `quantization: 8bit` with `backend: unsloth` is refused at config load: Soup's Unsloth loader passes `load_in_4bit` only, so `8bit` used to load the model in 16-bit with no word (#1811). Use `4bit` or `none` on this backend, or `backend: transformers` for 8-bit.
 
+`training.lora.rank_pattern` and `training.lora.alpha_pattern` are refused on `backend: unsloth` for every task that has an unsloth setup ([#2153](https://github.com/MakazhanAlpamys/Soup/issues/2153)): the unsloth loader attaches every adapter from the one scalar `lora.r` and `lora.alpha`, so per-module ranks and alphas would be dropped without a word. Remove them, or use `backend: transformers`, which applies them. An empty `{}` sets nothing and still loads.
+
 > **Tip:** Soup auto-detects unsloth. When it is installed, `soup train` prints a hint if you haven't enabled it yet and your config would load with it.
 
 ### Gradient checkpointing on Unsloth
