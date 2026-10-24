@@ -462,6 +462,8 @@ def test_native_loader_corrupt_weights_have_friendly_cli_error(
 def test_native_missing_dependency_has_install_hint(tmp_path, monkeypatch):
     import builtins
 
+    from tests.conftest import strip_ansi
+
     args = _infer_args(tmp_path, monkeypatch)
     original = builtins.__import__
 
@@ -473,7 +475,7 @@ def test_native_missing_dependency_has_install_hint(tmp_path, monkeypatch):
     monkeypatch.setattr(builtins, "__import__", missing)
     result = runner.invoke(app, args)
     assert result.exit_code == 1
-    assert "soup-cli[mlx]" in result.output
+    assert "soup-cli[mlx]" in " ".join(strip_ansi(result.output).split())
     assert not (tmp_path / "results.jsonl").exists()
 
 
