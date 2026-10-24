@@ -5109,9 +5109,10 @@ UNSLOTH_SETUP_TASKS: frozenset[str] = frozenset({
 })
 
 #: The tasks with a trainer on ``backend: mlx``: SFT through mlx-lm's tuner and
-#: DPO, ORPO and SimPO through Soup's own loop (``trainer/mlx_dpo.py``). Validators that defer
-#: to :meth:`SoupConfig._validate_mlx_task_support` read this, not ``"sft"``.
-MLX_TASKS: frozenset[str] = frozenset({"sft", "dpo", "orpo", "simpo"})
+#: DPO, ORPO, SimPO and KTO through Soup's own loop (``trainer/mlx_dpo.py``).
+#: Validators that defer to :meth:`SoupConfig._validate_mlx_task_support` read
+#: this, not ``"sft"``.
+MLX_TASKS: frozenset[str] = frozenset({"sft", "dpo", "orpo", "simpo", "kto"})
 
 #: #1497 — the tasks whose trainer reads ``training.freeze_layers`` /
 #: ``training.freeze_ratio``: ``SFTTrainerWrapper._setup_transformers``, which
@@ -7036,8 +7037,9 @@ class SoupConfig(BaseModel):
         I/O on a real base. The same refusal now applies to every
         ``task='kto'`` config, resident or streamed, before anything loads.
         """
-        if self.backend == "mlx":
+        if self.backend == "mlx" and self.task not in MLX_TASKS:
             return self  # _validate_mlx_task_support gives the more basic answer
+        # MLX KTO (#2000) builds TRL's KL rows and keeps the same floor.
         tcfg = self.training
         if (
             self.task == "kto"
@@ -8581,23 +8583,23 @@ class SoupConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_mlx_task_support(self) -> "SoupConfig":
-        """MLX backend supports sft, dpo, orpo and simpo.
+        """MLX backend supports sft, dpo, orpo, simpo and kto.
 
-        SFT runs through mlx-lm's tuner; DPO, ORPO and SimPO through Soup's own
-        loop in ``trainer/mlx_dpo.py`` / ``trainer/mlx_orpo.py`` /
-        ``trainer/mlx_simpo.py``. Every other task -- GRPO included, whose MLX
-        wrapper is still scaffolding -- is refused here rather than at
-        ``train()`` time.
+        SFT runs through mlx-lm's tuner; DPO, ORPO, SimPO and KTO through Soup's
+        own loop in ``trainer/mlx_dpo.py`` / ``trainer/mlx_orpo.py`` /
+        ``trainer/mlx_simpo.py`` / ``trainer/mlx_kto.py``. Every other task --
+        GRPO included, whose MLX wrapper is still scaffolding -- is refused here
+        rather than at ``train()`` time.
         """
         if self.backend != "mlx":
             return self
-        if self.task in ("dpo", "orpo", "simpo"):
+        if self.task in ("dpo", "orpo", "simpo", "kto"):
             # The native preference loops tokenize text and chat rows only and
-            # train a LoRA adapter. DPO's reference log-probs come from the
-            # policy before training, which is the base model only because a
-            # LoRA adapter's B starts at zero; ORPO and SimPO train LoRA only
-            # (no full fine-tune on MLX yet).
-            name = {"dpo": "DPO", "orpo": "ORPO", "simpo": "SimPO"}[self.task]
+            # train a LoRA adapter. DPO's and KTO's reference log-probs come
+            # from the policy before training, which is the base model only
+            # because a LoRA adapter's B starts at zero; ORPO and SimPO train
+            # LoRA only (no full fine-tune on MLX yet).
+            name = {"dpo": "DPO", "orpo": "ORPO", "simpo": "SimPO", "kto": "KTO"}[self.task]
             if self.modality != "text":
                 raise ValueError(
                     f"modality='{self.modality}' is not supported by task='{self.task}' "
@@ -8608,7 +8610,7 @@ class SoupConfig(BaseModel):
                 why = (
                     "the reference model is the untrained LoRA policy, which needs "
                     "a LoRA adapter to exist"
-                    if self.task == "dpo"
+                    if self.task in ("dpo", "kto")
                     else f"MLX {name} trains a LoRA adapter; full fine-tuning is not "
                     "implemented on backend='mlx'"
                 )
@@ -8616,7 +8618,7 @@ class SoupConfig(BaseModel):
                     f"training.lora.r must be at least 1 for task='{self.task}' on "
                     f"backend='mlx': {why}."
                 )
-            if self.task in ("orpo", "simpo") and self.training.quantization == "8bit":
+            if self.task in ("orpo", "simpo", "kto") and self.training.quantization == "8bit":
                 raise ValueError(
                     f"training.quantization='8bit' is not supported by task='{self.task}' "
                     "on backend='mlx': use quantization: none, or a pre-quantized "
@@ -8630,8 +8632,8 @@ class SoupConfig(BaseModel):
         if self.task == "preference" and self.training.preference_loss in native:
             hint = f" Use task: {self.training.preference_loss} for the native MLX trainer."
         raise ValueError(
-            f"MLX backend only ships SFT, DPO, ORPO and SimPO; task='{self.task}' has no "
-            "trainer on backend='mlx'."
+            f"MLX backend only ships SFT, DPO, ORPO, SimPO and KTO; task='{self.task}' has "
+            "no trainer on backend='mlx'."
             + (hint or f" Use backend=transformers for task={self.task}.")
         )
 
@@ -8667,9 +8669,10 @@ class SoupConfig(BaseModel):
         ``backend: mlx``. Stop-gap: delete this validator (and
         ``tests/test_mlx_lora_pattern_refusal.py``) when the MLX trainer honours them.
 
-        SFT, DPO, ORPO and SimPO all build the adapter in ``MLXSFTTrainerWrapper._apply_lora``
-        from one scalar ``lora.r`` and ``lora.alpha``, so a config that set a pattern
-        trained a uniform-rank adapter without a word. Not part of
+        SFT, DPO, ORPO, SimPO and KTO all build the adapter in
+        ``MLXSFTTrainerWrapper._apply_lora`` from one scalar ``lora.r`` and
+        ``lora.alpha``, so a config that set a pattern trained a uniform-rank adapter
+        without a word. Not part of
         :meth:`_validate_peft_variant_backend_and_quantization`, which returns early
         for plain LoRA; defined after :meth:`_validate_mlx_task_support` (and the
         ``lora.r=0`` check) on purpose, so a task MLX cannot run, or a config with no
@@ -9227,6 +9230,22 @@ class SoupConfig(BaseModel):
             "would train without one. "
             f"Use {changes}, or set use_mod: false."
         )
+
+    @model_validator(mode="after")
+    def _reject_resident_kimi_k2(self) -> "SoupConfig":
+        """K2 remote code cannot import or train on the supported 5.x stack."""
+        from soup_cli.utils.kimi import resident_kimi_k2_refusal
+
+        reason = resident_kimi_k2_refusal(
+            self.base, backend=self.backend, hub=self.training.hub,
+            stream_layers=self.training.stream_layers,
+        )
+        if reason is not None:
+            raise ValueError(
+                f"{reason} base={self.base}. Its remote code uses removed APIs "
+                "and an inference-only MoE training path. Choose a compatible base."
+            )
+        return self
 
     @model_validator(mode="after")
     def _validate_unsloth_sft_modality(self) -> "SoupConfig":
