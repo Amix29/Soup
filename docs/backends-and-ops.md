@@ -812,8 +812,9 @@ way to skip that cleanup is to kill the controller process itself (for example w
 another terminal), which can leave the instance running. If remote training fails with a non-zero exit
 code, the controller fetches the last 50 lines of `/home/ubuntu/soup/train.log` over SSH (capped at 50 KB
 and sanitized of terminal control sequences) and prints them before terminating the instance so
-the root cause is immediately visible (the log file holds only `soup train` output; an earlier failure
-during cloud-init or `pip install` is not captured in it).
+the root cause is immediately visible. The log is created before the first step that can fail and
+holds the `apt-get` and `pip install` output as well as `soup train` output, so an early install
+failure (for example a `Requires-Python` mismatch) is shown instead of an empty tail.
 
 Register the public half of an SSH key with Lambda first, then set:
 
