@@ -1128,6 +1128,9 @@ Listed by first contribution. PR numbers link the work.
 - **Ryzn** ([@ryznren](https://github.com/ryznren))
   - First contribution. A judge failure reason in GRPO `judge_rank` is cut to 200 characters plus `...`, but no test passed one of exactly 200, so an ellipsis on a reason that was never cut went unnoticed. They added the 200- and 201-character cases for `_cut`, with a distinct 201st character so an off-by-one slice fails as well, and named in the pull request the mutation they checked; six boundary changes that passed on `main` now fail ([#2304](https://github.com/MakazhanAlpamys/Soup/issues/2304), [#2317](https://github.com/MakazhanAlpamys/Soup/pull/2317))
 
+- **Tektrix** ([@Tektrix](https://github.com/Tektrix))
+  - First contribution. mypy reported 11 errors in code added for v0.77.1, across the MLX GRPO trainer, the ship progress stream, expert streaming and layer streaming. They fixed all 11 with annotations and narrowing only, listed each error with the command they ran, and compared the whole mypy output before and after to show that nothing new appeared ([#2305](https://github.com/MakazhanAlpamys/Soup/issues/2305), [#2320](https://github.com/MakazhanAlpamys/Soup/pull/2320))
+
 ---
 
 Want to join this list? See [CONTRIBUTING.md](CONTRIBUTING.md) — good first issues are
