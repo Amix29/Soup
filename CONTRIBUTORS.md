@@ -1136,6 +1136,9 @@ Listed by first contribution. PR numbers link the work.
 - **Tektrix** ([@Tektrix](https://github.com/Tektrix))
   - First contribution. mypy reported 11 errors in code added for v0.77.1, across the MLX GRPO trainer, the ship progress stream, expert streaming and layer streaming. They fixed all 11 with annotations and narrowing only, listed each error with the command they ran, and compared the whole mypy output before and after to show that nothing new appeared ([#2305](https://github.com/MakazhanAlpamys/Soup/issues/2305), [#2320](https://github.com/MakazhanAlpamys/Soup/pull/2320))
 
+- **Columbus Labs** ([@ColumbusLabs](https://github.com/ColumbusLabs))
+  - First contribution. `soup quantize --to awq` and `--to gptq` refused with a line that read like a typo, though `soup export` already said the two formats were removed in v0.77.0, and a `--to` value that looked like Rich markup either crashed the command with a `MarkupError` (exit 1) or lost its tags. They added the removal sentence with the version read from `EXPORT_FORMATS_REMOVED_IN`, not typed a second time, and sent the rejected value through `for_terminal`, so `[/]` and `[bold]x[/bold]` are shown as typed with the usage exit 2. The tests read the version from the same constant, check that the removal line follows the refusal, and cover upper case, mixed case and surrounding spaces; with `main`'s source 8 of them fail, and 7 of 7 one-at-a-time changes are caught ([#2210](https://github.com/MakazhanAlpamys/Soup/issues/2210), [#2217](https://github.com/MakazhanAlpamys/Soup/pull/2217))
+
 ---
 
 Want to join this list? See [CONTRIBUTING.md](CONTRIBUTING.md) — good first issues are
