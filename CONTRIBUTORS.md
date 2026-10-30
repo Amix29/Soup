@@ -1147,6 +1147,9 @@ Listed by first contribution. PR numbers link the work.
 - **Tejas** ([@TejasS1233](https://github.com/TejasS1233))
   - First contribution. Five help and config descriptions still described v0.77.0 code: `soup mcp serve` said nothing ever executes, `soup ab` was still called an mSPRT, `soup train --gpu` hid RunPod's types behind "provider-specific allowlists", `--tool-auth-token` left out the thumbs and adapter routes, and `training.kv_cache_type` claimed `soup serve` applies it. They rewrote all five to match the code, kept the internal names and the generated pages as the issue asked, and added a test that rejects each old string and compares every provider's listed GPUs with its own `SUPPORTED_GPUS`; after review they restored the facts the `docs/commands.md` line had dropped and pinned the last old string, and 13 of 13 one-at-a-time changes are caught ([#2221](https://github.com/MakazhanAlpamys/Soup/issues/2221), [#2268](https://github.com/MakazhanAlpamys/Soup/pull/2268))
 
+- **Baktiyar Ablaikhan** ([@sronters](https://github.com/sronters))
+  - First contribution. Setting `KBIT_LOGITS_EXTRA_BYTES`, the 2 extra bytes per logit element a 4-bit or 8-bit run is charged for its fp32 output head, to 0 left `tests/test_vram_estimate.py` green. They added a test for both quantizations that compares the run with the same run at 16 bits and writes the expected 2 bytes as a literal, so a change to the constant fails it; 10 of 10 one-at-a-time changes to the logits charge are caught ([#2304](https://github.com/MakazhanAlpamys/Soup/issues/2304), [#2351](https://github.com/MakazhanAlpamys/Soup/pull/2351))
+
 ---
 
 Want to join this list? See [CONTRIBUTING.md](CONTRIBUTING.md) — good first issues are
